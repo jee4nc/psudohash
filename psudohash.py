@@ -6,7 +6,7 @@
 # Fork: refactored to a generator-based pipeline (no global mutable state)
 # with a single source of truth for the output count.
 
-import argparse, os, sys, itertools
+import argparse, os, sys, itertools, datetime
 from pathlib import Path
 from tqdm import tqdm
 
@@ -40,8 +40,17 @@ TRANSFORMATIONS = [
     {'t': '7'},
 ]
 
-# Separators inserted between a mutated word and an appended year.
+# Separators inserted between a mutated word and an appended year/date.
 YEAR_SEPARATORS = ['', '_', '-', '@']
+
+# Date format tokens supported by --date-formats, and the curated default set.
+# Tokens: d=day, m=month, Y=4-digit year, y=2-digit year.
+DATE_FORMATS = ('ddmmyyyy', 'ddmmyy', 'mmddyyyy', 'mmddyy', 'yyyymmdd',
+                'mmyyyy', 'mmyy', 'ddmm', 'mmdd', 'yyyy', 'yy')
+DEFAULT_DATE_FORMATS = ['ddmmyyyy', 'ddmmyy', 'mmyyyy', 'ddmm', 'yyyy', 'yy']
+
+# Maximum day per month (Feb=29 so leap-day patterns are included).
+_DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
 
 # ----------------( Pure generation helpers )---------------- #
@@ -177,6 +186,73 @@ def year_variants(word, years, separators):
             yield f"{word}{sep}{y[2:]}"
 
 
+def build_dates(years, formats):
+    """
+    Build the list of date strings (no word/separator attached) for the given
+    years (list of 4-digit strings) and format tokens. Day/month combinations
+    are validated so impossible dates (e.g. 31/02) are skipped. Order-preserving
+    and de-duplicated.
+    """
+    seen = set()
+    out = []
+
+    def add(s):
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    needs_day = {'ddmmyyyy', 'ddmmyy', 'mmddyyyy', 'mmddyy', 'yyyymmdd', 'ddmm', 'mmdd'}
+
+    for fmt in formats:
+        if fmt == 'yyyy':
+            for y in years:
+                add(y)
+
+        elif fmt == 'yy':
+            for y in years:
+                add(y[2:])
+
+        elif fmt == 'mmyyyy':
+            for y in years:
+                for m in range(1, 13):
+                    add(f"{m:02d}{y}")
+
+        elif fmt == 'mmyy':
+            for y in years:
+                for m in range(1, 13):
+                    add(f"{m:02d}{y[2:]}")
+
+        elif fmt in ('ddmm', 'mmdd'):
+            # Year-independent; Feb 29 included via _DAYS_IN_MONTH.
+            for m in range(1, 13):
+                for d in range(1, _DAYS_IN_MONTH[m - 1] + 1):
+                    dd, mm = f"{d:02d}", f"{m:02d}"
+                    add(f"{dd}{mm}" if fmt == 'ddmm' else f"{mm}{dd}")
+
+        elif fmt in needs_day:
+            for y in years:
+                yi = int(y)
+                for m in range(1, 13):
+                    for d in range(1, _DAYS_IN_MONTH[m - 1] + 1):
+                        try:
+                            datetime.date(yi, m, d)
+                        except ValueError:
+                            continue  # e.g. 29/02 on a non-leap year
+                        dd, mm, yy = f"{d:02d}", f"{m:02d}", y[2:]
+                        if fmt == 'ddmmyyyy':
+                            add(f"{dd}{mm}{y}")
+                        elif fmt == 'ddmmyy':
+                            add(f"{dd}{mm}{yy}")
+                        elif fmt == 'mmddyyyy':
+                            add(f"{mm}{dd}{y}")
+                        elif fmt == 'mmddyy':
+                            add(f"{mm}{dd}{yy}")
+                        elif fmt == 'yyyymmdd':
+                            add(f"{y}{mm}{dd}")
+
+    return out
+
+
 def paddings_after(word, paddings):
     """Yield "<word><pad>" and (unless pad starts with '_') "<word>_<pad>"."""
     for val in paddings:
@@ -221,15 +297,23 @@ def generate_keyword(keyword, cfg):
                 if ok(v):
                     yield v
 
-    # Pool that the padding stages operate on: base words plus year variants.
-    pool = base
+    # Pool that the padding stages operate on: base words plus year/date variants.
+    pool = list(base)
     if cfg.years:
-        pool = list(base)
         for w in base:
             for v in year_variants(w, cfg.years, YEAR_SEPARATORS):
                 if ok(v):
                     yield v
                 pool.append(v)
+
+    if cfg.dates:
+        for w in base:
+            for d in cfg.dates:
+                for sep in YEAR_SEPARATORS:
+                    v = f"{w}{sep}{d}"
+                    if ok(v):
+                        yield v
+                    pool.append(v)
 
     if cfg.pad_after:
         for w in pool:
@@ -271,17 +355,18 @@ def deduplicate_file(path):
 class Config:
     """Resolved run settings derived from parsed CLI arguments."""
     __slots__ = ('minlen', 'maxlen', 'numbering_level', 'numbering_max',
-                 'years', 'paddings', 'pad_after', 'pad_before',
+                 'years', 'dates', 'paddings', 'pad_after', 'pad_before',
                  'case_mode', 'leet_mode', 'require')
 
     def __init__(self, minlen, maxlen, numbering_level, numbering_max,
                  years, paddings, pad_after, pad_before,
-                 case_mode='all', leet_mode='all', require=None):
+                 case_mode='all', leet_mode='all', require=None, dates=None):
         self.minlen = minlen
         self.maxlen = maxlen
         self.numbering_level = numbering_level
         self.numbering_max = numbering_max
         self.years = years
+        self.dates = dates or []
         self.paddings = paddings
         self.pad_after = pad_after
         self.pad_before = pad_before
@@ -332,6 +417,8 @@ Usage examples:
     parser.add_argument("-an", "--append-numbering", action="store", help="Append numbering range at the end of each word mutation (before appending year or common paddings).\nThe LEVEL value represents the minimum number of digits. LEVEL must be >= 1. \nSet to 1 will append range: 1,2,3..100\nSet to 2 will append range: 01,02,03..100 + previous\nSet to 3 will append range: 001,002,003..100 + previous.\n\n", type=int, metavar='LEVEL')
     parser.add_argument("-nl", "--numbering-limit", action="store", help="Change max numbering limit value of option -an. Default is 50. Must be used with -an.", type=int, metavar='LIMIT')
     parser.add_argument("-y", "--years", action="store", help="Single OR comma separated OR range of years to be appended to each word mutation (Example: 2022 OR 1990,2017,2022 OR 1990-2000)")
+    parser.add_argument("-d", "--dates", action="store", help="Append common date patterns (birthdays etc.) for a year OR comma list OR range of years\n(Example: 1998 OR 1990-2000). Combined with each keyword using the same separators as -y,\nso e.g. pedro + 01/1998 -> pedro011998. Formats are controlled by --date-formats.", metavar='YEARS')
+    parser.add_argument("--date-formats", action="store", help="Comma separated date formats for -d (default: %s).\nAvailable: %s." % (','.join(DEFAULT_DATE_FORMATS), ','.join(DATE_FORMATS)), metavar='FORMATS')
     parser.add_argument("-ap", "--append-padding", action="store", help="Add comma separated values to common paddings (must be used with -cpb OR -cpa)", metavar='VALUES')
     parser.add_argument("-cpb", "--common-paddings-before", action="store_true", help="Append common paddings before each mutated word")
     parser.add_argument("-cpa", "--common-paddings-after", action="store_true", help="Append common paddings after each mutated word")
@@ -505,6 +592,28 @@ def main():
     numbering_max = (args.numbering_limit + 1) if args.numbering_limit else 51
 
     years = parse_years(parser, args.years) if args.years else []
+
+    # --date-formats requires --dates
+    if args.date_formats and not args.dates:
+        exit_with_msg(parser, 'Option --date-formats must be used with -d/--dates.')
+
+    dates = []
+    if args.dates:
+        date_years = parse_years(parser, args.dates)
+        if args.date_formats:
+            formats = []
+            for fmt in args.date_formats.split(','):
+                fmt = fmt.strip().lower()
+                if fmt == '':
+                    continue
+                if fmt not in DATE_FORMATS:
+                    exit_with_msg(parser, f'Unknown date format "{fmt}". '
+                                          f'Choose from: {", ".join(DATE_FORMATS)}.')
+                formats.append(fmt)
+        else:
+            formats = DEFAULT_DATE_FORMATS
+        dates = build_dates(date_years, formats)
+
     paddings = load_paddings(parser, args)
 
     # The --realistic preset is shorthand for realistic case + realistic leet.
@@ -538,6 +647,7 @@ def main():
         case_mode=case_mode,
         leet_mode=leet_mode,
         require=require,
+        dates=dates,
     )
 
     outfile = args.output if args.output else 'output.txt'

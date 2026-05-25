@@ -76,7 +76,7 @@ uv run pytest
 
 ## Usage
 ```
-./psudohash.py [-h] -w WORDS [-i] [-c] [--sep SEP] [--max-combine N] [--minlen N] [--maxlen N] [--case-mode {all,realistic}] [--leet-mode {all,realistic,none}] [--require CLASSES] [-R] [-an LEVEL] [-nl LIMIT] [-y YEARS] [-ap VALUES] [-cpb] [-cpa] [-cpo] [-o FILENAME] [-q] [--no-color] [-u]
+./psudohash.py [-h] -w WORDS [-i] [-c] [--sep SEP] [--max-combine N] [--minlen N] [--maxlen N] [--case-mode {all,realistic}] [--leet-mode {all,realistic,none}] [--require CLASSES] [-R] [-an LEVEL] [-nl LIMIT] [-y YEARS] [-d YEARS] [--date-formats FORMATS] [-ap VALUES] [-cpb] [-cpa] [-cpo] [-o FILENAME] [-q] [--no-color] [-u]
 ```
 The help dialog [ -h, --help ] includes usage details and examples.
 
@@ -123,6 +123,12 @@ The help dialog [ -h, --help ] includes usage details and examples.
 
 - **`-y, --years <years>`**  
   Append one or more years to each mutation (e.g. `1990-2000`, or `2022,2023`).
+
+- **`-d, --dates <years>`**  
+  Append common date patterns (birthdays, etc.) for a year, comma list or range of years (e.g. `1998` or `1990-2000`). Each pattern is joined to the keyword with the same separators as `-y`, so `pedro` + `01/1998` produces `pedro011998`, `pedro_011998`, … Impossible dates (e.g. `31/02`) are skipped. The set of formats is controlled by `--date-formats`.
+
+- **`--date-formats <formats>`** (default: `ddmmyyyy,ddmmyy,mmyyyy,ddmm,yyyy,yy`)  
+  Comma‐separated date formats for `-d`. Available tokens: `ddmmyyyy, ddmmyy, mmddyyyy, mmddyy, yyyymmdd, mmyyyy, mmyy, ddmm, mmdd, yyyy, yy`.
 
 - **`-ap, --append-padding <vals>`**  
   Append custom padding values (comma‐separated). Must be used with `-cpb` or `-cpa`.
@@ -204,6 +210,15 @@ The help dialog [ -h, --help ] includes usage details and examples.
    ./psudohash.py -w amazon -R -y 2024 --require upper,digit --minlen 8
    # Only candidates with an uppercase letter AND a digit, length >= 8
    ```
+
+10. **Birthday / date patterns (e.g. `pedro011998`)**  
+    ```bash
+    ./psudohash.py -w pedro -d 1998 -R
+    # → pedro011998, pedro01011998, pedro0101, pedro1998, ... for every plausible date
+    # Narrow the formats if you know the shape:
+    ./psudohash.py -w pedro -d 1998 --date-formats mmyyyy -R
+    # → pedro011998, pedro021998, ... pedro121998
+    ```
 
 ## Usage Tips
 1. Combining options `--years` and `--append-numbering` with a `--numbering-limit` ≥ last two digits of any year input, will most likely produce duplicate words because of the mutation patterns implemented by the tool. 

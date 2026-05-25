@@ -113,6 +113,33 @@ def test_year_variants_full_and_short():
     assert out == ["amazon2020", "amazon20", "amazon_2020", "amazon_20"]
 
 
+# ----------------( build_dates )---------------- #
+def test_build_dates_mmyyyy():
+    out = ph.build_dates(["1998"], ["mmyyyy"])
+    assert out[0] == "011998"
+    assert "121998" in out
+    assert len(out) == 12
+
+
+def test_build_dates_year_tokens():
+    assert ph.build_dates(["1998"], ["yyyy", "yy"]) == ["1998", "98"]
+
+
+def test_build_dates_skips_impossible_dates():
+    # 1999 is not a leap year -> no 29 Feb; 2000 is -> 29 Feb present.
+    assert "29021999" not in ph.build_dates(["1999"], ["ddmmyyyy"])
+    assert "29022000" in ph.build_dates(["2000"], ["ddmmyyyy"])
+    # 31 Feb / 31 Apr never exist.
+    ddmm = ph.build_dates(["2000"], ["ddmm"])
+    assert "3102" not in ddmm and "3104" not in ddmm
+    assert "0101" in ddmm and "3112" in ddmm
+
+
+def test_build_dates_dedup_and_order():
+    out = ph.build_dates(["1998", "1998"], ["yyyy"])  # duplicate year
+    assert out == ["1998"]
+
+
 # ----------------( paddings )---------------- #
 def test_paddings_after_underscore_rule():
     # "!" -> word!, word_!  ; "_x" -> word_x only (already starts with '_')
@@ -147,6 +174,19 @@ def test_generate_keyword_maxlen_filters_uniformly():
     out = list(ph.generate_keyword("amazon", cfg))
     assert out, "expected some output"
     assert all(len(w) <= 7 for w in out)
+
+
+def test_generate_keyword_dates_appended_with_separators():
+    cfg = _cfg(dates=["011998"])
+    out = set(ph.generate_keyword("pedro", cfg))
+    assert "pedro011998" in out
+    assert "pedro_011998" in out   # one of the YEAR_SEPARATORS variants
+
+
+def test_generate_keyword_dates_feed_padding_pool():
+    cfg = _cfg(dates=["011998"], paddings=["!"], pad_after=True)
+    out = set(ph.generate_keyword("pedro", cfg))
+    assert "pedro011998!" in out   # padding applied to a date variant
 
 
 def test_generate_keyword_require_filters_emitted_but_not_pool():
