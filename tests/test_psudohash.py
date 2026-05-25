@@ -1,5 +1,8 @@
 """Unit tests for the pure generation helpers in psudohash."""
 import itertools
+import sys
+
+import pytest
 
 import psudohash as ph
 
@@ -207,11 +210,166 @@ def test_generate_keyword_years_feed_paddings_not_numbering():
     assert "foo1!" not in out         # padding NOT applied to a numbering variant
 
 
-# ----------------( deduplicate_file )---------------- #
-def test_deduplicate_file(tmp_path):
-    p = tmp_path / "wl.txt"
-    p.write_text("a\nb\na\nc\nb\na\n")
-    kept, removed = ph.deduplicate_file(str(p))
-    assert kept == 3
-    assert removed == 3
-    assert p.read_text() == "a\nb\nc\n"  # first-seen order preserved
+# ----------------( --unique end-to-end )---------------- #
+def _run_main(monkeypatch, argv, answer="y"):
+    """Drive main() with a mocked argv and a canned consent answer."""
+    monkeypatch.setattr(sys, "argv", ["psudohash.py", *argv])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: answer)
+    ph.main()
+
+
+def test_main_unique_removes_duplicates_in_place(tmp_path, monkeypatch):
+    # -an 2 -nl 11 makes numbering emit "x11" at both width 1 and width 2,
+    # a guaranteed duplicate. --unique must collapse it without a 2nd file pass.
+    out = tmp_path / "out.txt"
+    args = ["-w", "x", "-an", "2", "-nl", "11", "-u", "-q", "--no-color", "-o", str(out)]
+    _run_main(monkeypatch, args)
+    lines = out.read_text().splitlines()
+    assert lines == list(dict.fromkeys(lines))  # no dups, first-seen order kept
+    assert lines.count("x11") == 1
+
+
+def test_main_without_unique_keeps_duplicates(tmp_path, monkeypatch):
+    out = tmp_path / "out.txt"
+    args = ["-w", "x", "-an", "2", "-nl", "11", "-q", "--no-color", "-o", str(out)]
+    _run_main(monkeypatch, args)
+    lines = out.read_text().splitlines()
+    assert lines.count("x11") == 2  # duplicate retained without -u
+
+
+# ----------------( load_paddings )---------------- #
+def test_load_paddings_custom_only_preserves_order():
+    # -cpo skips the bundled file, so paddings come solely from -ap, in order.
+    # Order must be deterministic (not reshuffled by set() hashing).
+    parser = ph.build_parser()
+    args = parser.parse_args(["-w", "x", "-cpa", "-cpo", "-ap", "zzz,aaa,mmm,bbb"])
+    assert ph.load_paddings(parser, args) == ["zzz", "aaa", "mmm", "bbb"]
+
+
+def test_load_paddings_dedup_is_order_preserving():
+    parser = ph.build_parser()
+    args = parser.parse_args(["-w", "x", "-cpb", "-cpo", "-ap", "aa,bb,aa,cc"])
+    assert ph.load_paddings(parser, args) == ["aa", "bb", "cc"]
+
+
+# ----------------( padding_directions )---------------- #
+def test_padding_directions_cpo_does_not_force_after():
+    # -cpo with only -cpb must keep pad_after off (it only controls the source).
+    parser = ph.build_parser()
+    args = parser.parse_args(["-w", "x", "-cpb", "-cpo", "-ap", "!"])
+    assert ph.padding_directions(args) == (False, True)
+
+
+def test_padding_directions_from_cpa_cpb():
+    parser = ph.build_parser()
+    assert ph.padding_directions(parser.parse_args(["-w", "x", "-cpa"])) == (True, False)
+    assert ph.padding_directions(parser.parse_args(["-w", "x", "-cpb"])) == (False, True)
+    assert ph.padding_directions(parser.parse_args(["-w", "x", "-cpa", "-cpb"])) == (True, True)
+
+
+# ----------------( build_periods )---------------- #
+def test_build_periods_seasons_en():
+    out = ph.build_periods(["2024"], ["en"], want_seasons=True, want_months=False)
+    assert out[:2] == ["Spring2024", "Spring24"]  # full year then 2-digit year
+    assert "Winter24" in out
+    assert len(out) == 5 * 2  # 5 seasons x 2 year forms
+
+
+def test_build_periods_months_include_abbreviations():
+    out = ph.build_periods(["2024"], ["en"], want_seasons=False, want_months=True)
+    assert {"January2024", "Jan2024", "Jan24"} <= set(out)
+    assert len(out) == len(set(out))  # no duplicates (e.g. "May" full == abbr)
+
+
+def test_build_periods_spanish_ships_accent_and_ascii():
+    out = ph.build_periods(["2024"], ["es"], want_seasons=True, want_months=False)
+    assert "Otoño2024" in out      # canonical accented form
+    assert "Otono2024" in out      # ASCII fallback
+    assert "Primavera24" in out
+
+
+def test_build_periods_dedup_on_repeated_year():
+    out = ph.build_periods(["2024", "2024"], ["en"], want_seasons=True, want_months=False)
+    assert len(out) == 5 * 2  # duplicate year collapsed, order preserved
+
+
+# ----------------( --seasons / --months pipeline )---------------- #
+def test_generate_keyword_periods_appended_and_feed_pool():
+    cfg = _cfg(periods=["Spring2024"], paddings=["!"], pad_after=True)
+    out = set(ph.generate_keyword("amazon", cfg))
+    assert "amazonSpring2024" in out
+    assert "amazon_Spring2024" in out    # one of the YEAR_SEPARATORS variants
+    assert "amazonSpring2024!" in out    # period variant fed the padding pool
+
+
+def test_main_seasons_require_years_exits(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["psudohash.py", "-w", "x", "--seasons", "-q", "--no-color"])
+    with pytest.raises(SystemExit):
+        ph.main()
+
+
+def test_main_seasons_end_to_end(tmp_path, monkeypatch):
+    out = tmp_path / "out.txt"
+    args = ["-w", "amazon", "--seasons", "-y", "2024", "--lang", "en,es",
+            "-R", "-q", "--no-color", "-o", str(out)]
+    _run_main(monkeypatch, args)
+    lines = set(out.read_text().splitlines())
+    assert "amazonSpring2024" in lines
+    assert "amazonPrimavera2024" in lines  # Spanish season included via --lang
+
+
+# ----------------( --reverse )---------------- #
+def test_main_reverse_adds_reversed_keyword(tmp_path, monkeypatch):
+    out = tmp_path / "out.txt"
+    args = ["-w", "amazon", "--reverse", "--leet-mode", "none",
+            "--case-mode", "realistic", "-q", "--no-color", "-o", str(out)]
+    _run_main(monkeypatch, args)
+    lines = set(out.read_text().splitlines())
+    assert "amazon" in lines
+    assert "nozama" in lines  # reversed keyword fully mutated too
+
+
+# ----------------( human_size )---------------- #
+def test_human_size_scales_units():
+    assert ph.human_size(500) == "500 bytes"
+    assert ph.human_size(1500) == "1.5 KB"
+    assert ph.human_size(100_001) == "100.0 KB"   # used to jump straight to MB
+    assert ph.human_size(2_500_000) == "2.5 MB"
+    assert ph.human_size(5_000_000_000) == "5.0 GB"
+
+
+# ----------------( prompt UX: --yes / overwrite / EOF )---------------- #
+def test_main_yes_skips_prompt(tmp_path, monkeypatch):
+    out = tmp_path / "out.txt"
+    # No input() patched: --yes must mean main() never blocks on the prompt.
+    def boom(*a, **k):
+        raise AssertionError("input() should not be called with --yes")
+    monkeypatch.setattr("builtins.input", boom)
+    monkeypatch.setattr(sys, "argv",
+                        ["psudohash.py", "-w", "amazon", "-R", "--yes",
+                         "-q", "--no-color", "-o", str(out)])
+    ph.main()
+    assert out.read_text().strip()  # file was written
+
+
+def test_main_overwrite_notice(tmp_path, monkeypatch, capsys):
+    out = tmp_path / "out.txt"
+    out.write_text("preexisting\n")
+    _run_main(monkeypatch,
+              ["-w", "amazon", "-R", "-q", "--no-color", "-o", str(out)])
+    assert "will be overwritten" in capsys.readouterr().out
+
+
+def test_main_eof_aborts_cleanly(tmp_path, monkeypatch):
+    # Ctrl+D / closed stdin raises EOFError -> clean SystemExit, no traceback.
+    out = tmp_path / "out.txt"
+    def eof(*a, **k):
+        raise EOFError
+    monkeypatch.setattr("builtins.input", eof)
+    monkeypatch.setattr(sys, "argv",
+                        ["psudohash.py", "-w", "amazon", "-R",
+                         "-q", "--no-color", "-o", str(out)])
+    with pytest.raises(SystemExit):
+        ph.main()
+    assert not out.exists()  # aborted before the write pass

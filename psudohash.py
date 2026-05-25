@@ -52,6 +52,27 @@ DEFAULT_DATE_FORMATS = ['ddmmyyyy', 'ddmmyy', 'mmyyyy', 'ddmm', 'yyyy', 'yy']
 # Maximum day per month (Feb=29 so leap-day patterns are included).
 _DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
+# Season / month names for the password-expiry pattern (e.g. "Spring2024").
+# Title-cased — the dominant form of this pattern. Spanish "Otoño" ships both
+# the accented form and an ASCII fallback ("Otono"), since targets type either.
+SUPPORTED_LANGS = ('en', 'es')
+SEASONS = {
+    'en': ['Spring', 'Summer', 'Fall', 'Autumn', 'Winter'],
+    'es': ['Primavera', 'Verano', 'Otoño', 'Otono', 'Invierno'],
+}
+MONTHS = {
+    'en': ['January', 'February', 'March', 'April', 'May', 'June',
+           'July', 'August', 'September', 'October', 'November', 'December'],
+    'es': ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+           'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'],
+}
+MONTH_ABBR = {
+    'en': ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+           'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+    'es': ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun',
+           'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'],
+}
+
 
 # ----------------( Pure generation helpers )---------------- #
 def within_length(word, minlen, maxlen):
@@ -269,18 +290,46 @@ def paddings_before(word, paddings):
             yield f"{val}_{word}"
 
 
+def build_periods(years, langs, want_seasons, want_months):
+    """
+    Build season/month + year tokens (e.g. 'Spring2024', 'Spring24', 'Ene2024')
+    for the password-expiry pattern. Each name is combined with the full year
+    and the 2-digit year. Names are taken in the given language order; month
+    names include their 3-letter abbreviations. Order-preserving, de-duplicated.
+    """
+    names = []
+    for lang in langs:
+        if want_seasons:
+            names.extend(SEASONS.get(lang, []))
+        if want_months:
+            names.extend(MONTHS.get(lang, []))
+            names.extend(MONTH_ABBR.get(lang, []))
+
+    seen = set()
+    out = []
+    for name in names:
+        for y in years:
+            for token in (f"{name}{y}", f"{name}{y[2:]}"):
+                if token not in seen:
+                    seen.add(token)
+                    out.append(token)
+    return out
+
+
 def generate_keyword(keyword, cfg):
     """
     Yield every final mutation for a single keyword, applying length filtering
     uniformly to each emitted word. Stages mirror the original tool:
 
-      1. base (case + leet) variants            -> always
-      2. numbering suffixes (from base)         -> if -an
-      3. year suffixes (from base, fed forward) -> if -y
-      4. paddings after / before (from base + year variants) -> if -cpa / -cpb
+      1. base (case + leet) variants                  -> always
+      2. numbering suffixes (from base)               -> if -an
+      3. year suffixes (from base, fed forward)       -> if -y
+      4. date suffixes (from base, fed forward)       -> if -d
+      5. period suffixes (season/month + year)        -> if --seasons/--months
+      6. paddings after / before (from base + year/date/period variants)
 
     Numbering variants are not fed into the padding stage (matching the original
-    behaviour); year variants are.
+    behaviour); year, date and period variants are.
     """
     def ok(w):
         return within_length(w, cfg.minlen, cfg.maxlen) and meets_complexity(w, cfg.require)
@@ -315,6 +364,15 @@ def generate_keyword(keyword, cfg):
                         yield v
                     pool.append(v)
 
+    if cfg.periods:
+        for w in base:
+            for p in cfg.periods:
+                for sep in YEAR_SEPARATORS:
+                    v = f"{w}{sep}{p}"
+                    if ok(v):
+                        yield v
+                    pool.append(v)
+
     if cfg.pad_after:
         for w in pool:
             for v in paddings_after(w, cfg.paddings):
@@ -328,45 +386,24 @@ def generate_keyword(keyword, cfg):
                     yield v
 
 
-def deduplicate_file(path):
-    """
-    Remove duplicate lines from `path` in place, preserving first-seen order.
-    Streams line by line through a temp file, holding only a set of seen lines
-    in memory. Returns (kept, removed) counts.
-    """
-    seen = set()
-    kept = removed = 0
-    tmp_path = f'{path}.dedup.tmp'
-
-    with open(path, 'r') as src, open(tmp_path, 'w') as dst:
-        for line in src:
-            if line in seen:
-                removed += 1
-                continue
-            seen.add(line)
-            dst.write(line)
-            kept += 1
-
-    os.replace(tmp_path, path)
-    return kept, removed
-
-
 # ----------------( CLI / configuration )---------------- #
 class Config:
     """Resolved run settings derived from parsed CLI arguments."""
     __slots__ = ('minlen', 'maxlen', 'numbering_level', 'numbering_max',
-                 'years', 'dates', 'paddings', 'pad_after', 'pad_before',
-                 'case_mode', 'leet_mode', 'require')
+                 'years', 'dates', 'periods', 'paddings', 'pad_after',
+                 'pad_before', 'case_mode', 'leet_mode', 'require')
 
     def __init__(self, minlen, maxlen, numbering_level, numbering_max,
                  years, paddings, pad_after, pad_before,
-                 case_mode='all', leet_mode='all', require=None, dates=None):
+                 case_mode='all', leet_mode='all', require=None, dates=None,
+                 periods=None):
         self.minlen = minlen
         self.maxlen = maxlen
         self.numbering_level = numbering_level
         self.numbering_max = numbering_max
         self.years = years
         self.dates = dates or []
+        self.periods = periods or []
         self.paddings = paddings
         self.pad_after = pad_after
         self.pad_before = pad_before
@@ -419,12 +456,17 @@ Usage examples:
     parser.add_argument("-y", "--years", action="store", help="Single OR comma separated OR range of years to be appended to each word mutation (Example: 2022 OR 1990,2017,2022 OR 1990-2000)")
     parser.add_argument("-d", "--dates", action="store", help="Append common date patterns (birthdays etc.) for a year OR comma list OR range of years\n(Example: 1998 OR 1990-2000). Combined with each keyword using the same separators as -y,\nso e.g. pedro + 01/1998 -> pedro011998. Formats are controlled by --date-formats.", metavar='YEARS')
     parser.add_argument("--date-formats", action="store", help="Comma separated date formats for -d (default: %s).\nAvailable: %s." % (','.join(DEFAULT_DATE_FORMATS), ','.join(DATE_FORMATS)), metavar='FORMATS')
+    parser.add_argument("--seasons", action="store_true", help="Append season+year tokens to each mutation (e.g. amazonSpring2024), the\ncommon password-expiry pattern. Requires -y for the year(s).")
+    parser.add_argument("--months", action="store_true", help="Append month+year tokens, full and abbreviated (e.g. amazonJanuary2024,\namazonJan2024). Requires -y for the year(s).")
+    parser.add_argument("--lang", action="store", help="Comma separated languages for --seasons/--months (default: en).\nAvailable: %s (e.g. --lang en,es)." % ','.join(SUPPORTED_LANGS), metavar='LANGS')
+    parser.add_argument("--reverse", action="store_true", help="Also mutate the reverse of each keyword (e.g. amazon -> nozama).")
     parser.add_argument("-ap", "--append-padding", action="store", help="Add comma separated values to common paddings (must be used with -cpb OR -cpa)", metavar='VALUES')
     parser.add_argument("-cpb", "--common-paddings-before", action="store_true", help="Append common paddings before each mutated word")
     parser.add_argument("-cpa", "--common-paddings-after", action="store_true", help="Append common paddings after each mutated word")
     parser.add_argument("-cpo", "--custom-paddings-only", action="store_true", help="Use only user provided paddings for word mutations (must be used with -ap AND (-cpb OR -cpa))")
     parser.add_argument("-o", "--output", action="store", help="Output filename (default: output.txt)", metavar='FILENAME')
     parser.add_argument("-q", "--quiet", action="store_true", help="Do not print the banner on startup")
+    parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt (assume yes). Useful for scripts / non-interactive runs.")
     parser.add_argument("--no-color", action="store_true", help="Disable colored output (also auto-disabled when stdout is not a TTY or NO_COLOR is set)")
     parser.add_argument("-u", "--unique", action="store_true", help="Remove duplicate lines from the final wordlist (order-preserving). Adds a post-processing pass.")
     return parser
@@ -489,9 +531,18 @@ def load_paddings(parser, args):
                 paddings.append(val)
 
     if use_paddings:
-        paddings = list(set(paddings))
+        paddings = list(dict.fromkeys(paddings))  # dedup, order-preserving
 
     return paddings
+
+
+def padding_directions(args):
+    """
+    Resolve (pad_after, pad_before) from the CLI flags. Direction comes solely
+    from -cpa / -cpb; -cpo (custom-paddings-only) controls the *source* of the
+    padding values, never the direction, so it must not switch on pad_after.
+    """
+    return bool(args.common_paddings_after), bool(args.common_paddings_before)
 
 
 def build_keywords(args):
@@ -562,9 +613,12 @@ def banner():
 
 
 def human_size(num_bytes):
-    if num_bytes > 100000:
-        return f'{round(num_bytes / 1000 / 1000, 1)} MB'
-    return f'{num_bytes} bytes'
+    """Format a byte count as B/KB/MB/GB (decimal units, 1 decimal place)."""
+    size = float(num_bytes)
+    for unit in ('bytes', 'KB', 'MB', 'GB'):
+        if size < 1000 or unit == 'GB':
+            return f'{int(size)} {unit}' if unit == 'bytes' else f'{size:.1f} {unit}'
+        size /= 1000
 
 
 # ----------------( Main )---------------- #
@@ -614,6 +668,26 @@ def main():
             formats = DEFAULT_DATE_FORMATS
         dates = build_dates(date_years, formats)
 
+    # Season/month tokens reuse the -y years (the pattern is "<period><year>").
+    if (args.seasons or args.months) and not years:
+        exit_with_msg(parser, 'Options --seasons/--months require -y/--years.')
+    if args.lang and not (args.seasons or args.months):
+        exit_with_msg(parser, 'Option --lang must be used with --seasons/--months.')
+
+    periods = []
+    if args.seasons or args.months:
+        langs = []
+        for lang in (args.lang.split(',') if args.lang else ['en']):
+            lang = lang.strip().lower()
+            if lang == '':
+                continue
+            if lang not in SUPPORTED_LANGS:
+                exit_with_msg(parser, f'Unknown language "{lang}" for --lang. '
+                                      f'Choose from: {", ".join(SUPPORTED_LANGS)}.')
+            if lang not in langs:
+                langs.append(lang)
+        periods = build_periods(years, langs, args.seasons, args.months)
+
     paddings = load_paddings(parser, args)
 
     # The --realistic preset is shorthand for realistic case + realistic leet.
@@ -635,6 +709,16 @@ def main():
     if keywords is None:
         exit_with_msg(parser, 'Unable to mutate digit-only keywords.')
 
+    if args.reverse:
+        seen = set(keywords)
+        for kw in list(keywords):
+            rev = kw[::-1]
+            if rev != kw and rev not in seen:
+                seen.add(rev)
+                keywords.append(rev)
+
+    pad_after, pad_before = padding_directions(args)
+
     cfg = Config(
         minlen=args.minlen,
         maxlen=args.maxlen,
@@ -642,12 +726,13 @@ def main():
         numbering_max=numbering_max,
         years=years,
         paddings=paddings,
-        pad_after=args.common_paddings_after or args.custom_paddings_only,
-        pad_before=args.common_paddings_before,
+        pad_after=pad_after,
+        pad_before=pad_before,
         case_mode=case_mode,
         leet_mode=leet_mode,
         require=require,
         dates=dates,
+        periods=periods,
     )
 
     outfile = args.output if args.output else 'output.txt'
@@ -663,31 +748,45 @@ def main():
             total_words += 1
             total_bytes += len(word) + 1
 
-    prompt = (f'[{ORANGE}Warning{END}] This operation will produce {BOLD}{total_words}{END} words, '
-              f'{BOLD}{human_size(total_bytes)}{END}'
-              f'{" (before deduplication)" if args.unique else ""}. '
-              f'Are you sure you want to proceed? [y/n]: ')
+    summary = (f'[{ORANGE}Warning{END}] This operation will produce {BOLD}{total_words}{END} words, '
+               f'{BOLD}{human_size(total_bytes)}{END}'
+               f'{" (before deduplication)" if args.unique else ""}.')
 
-    try:
-        consent = input(prompt)
-    except KeyboardInterrupt:
-        sys.exit('\n')
+    if os.path.exists(outfile):
+        print(f'[{ORANGE}Warning{END}] Output file "{outfile}" exists and will be overwritten.')
 
-    if consent.lower() not in ['y', 'yes']:
-        sys.exit(f'\n[{RED}X{END}] Aborting.')
+    if args.yes:
+        print(summary)
+    else:
+        try:
+            consent = input(f'{summary} Are you sure you want to proceed? [y/n]: ')
+        except (EOFError, KeyboardInterrupt):
+            # Ctrl+C / Ctrl+D / closed stdin -> abort cleanly, no traceback.
+            sys.exit('\n')
+        if consent.lower() not in ('y', 'yes'):
+            sys.exit(f'\n[{RED}X{END}] Aborting.')
 
-    # Write pass.
+    # Write pass. With --unique we deduplicate inline (order-preserving) as we
+    # write, so the file is touched only once — no second read+rewrite pass.
+    seen = set() if args.unique else None
+    written = removed = 0
     with open(outfile, 'w') as wordlist, \
          tqdm(total=total_words, desc=' ├─ Writing mutations', leave=False) as pbar:
         for word, kw in zip(keywords, lowered):
-            print(f'[{GREEN}*{END}] Mutating keyword: {GREEN}{word}{END}')
+            # tqdm.write() cooperates with the progress bar instead of clobbering it.
+            tqdm.write(f'[{GREEN}*{END}] Mutating keyword: {GREEN}{word}{END}')
             for mutation in generate_keyword(kw, cfg):
-                wordlist.write(mutation + '\n')
                 pbar.update(1)
+                if seen is not None:
+                    if mutation in seen:
+                        removed += 1
+                        continue
+                    seen.add(mutation)
+                wordlist.write(mutation + '\n')
+                written += 1
 
     if args.unique:
-        kept, removed = deduplicate_file(outfile)
-        print(f'[{MAIN}Info{END}] Removed {removed} duplicate(s); {kept} unique words remain.')
+        print(f'[{MAIN}Info{END}] Removed {removed} duplicate(s); {written} unique words remain.')
 
     print(f'\n[{MAIN}Info{END}] Completed! List saved in {outfile}\n')
 

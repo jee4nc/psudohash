@@ -47,6 +47,18 @@ YEAR_SEPARATORS = ['', '_', '-', '@']
 ```
 For example, if the given keyword is "amazon" and option `-y 2023` was used, the output will include "amazon2023", "amazon_2023", "amazon-2023", "amazon@2023", "amazon23", "amazon_23", "amazon-23", "amazon@23".
 
+### Season & Month Tokens
+A very common corporate pattern, driven by password‐expiry policies, is `Season + Year` or `Month + Year` (e.g. `Spring2024`, `Jan2025`). With `--seasons` and/or `--months`, psudohash appends these tokens to each mutation, reusing the years given with `-y` and joining them with the same `YEAR_SEPARATORS`. Both the full year and the 2‐digit year are produced (`Spring2024`, `Spring24`), and `--months` also includes 3‐letter abbreviations (`January2024`, `Jan2024`).
+
+Names are available in English and Spanish, selected with `--lang` (default `en`):
+```
+SEASONS = {
+    'en': ['Spring', 'Summer', 'Fall', 'Autumn', 'Winter'],
+    'es': ['Primavera', 'Verano', 'Otoño', 'Otono', 'Invierno'],
+}
+```
+The Spanish set ships both the accented form (`Otoño`) and an ASCII fallback (`Otono`), since targets type either. Edit the `SEASONS`, `MONTHS` and `MONTH_ABBR` dictionaries in `psudohash.py` to taste.
+
 ## Installation
 This fork uses [uv](https://docs.astral.sh/uv/) for dependency management.
 ```bash
@@ -76,7 +88,7 @@ uv run pytest
 
 ## Usage
 ```
-./psudohash.py [-h] -w WORDS [-i] [-c] [--sep SEP] [--max-combine N] [--minlen N] [--maxlen N] [--case-mode {all,realistic}] [--leet-mode {all,realistic,none}] [--require CLASSES] [-R] [-an LEVEL] [-nl LIMIT] [-y YEARS] [-d YEARS] [--date-formats FORMATS] [-ap VALUES] [-cpb] [-cpa] [-cpo] [-o FILENAME] [-q] [--no-color] [-u]
+./psudohash.py [-h] -w WORDS [-i] [-c] [--sep SEP] [--max-combine N] [--minlen N] [--maxlen N] [--case-mode {all,realistic}] [--leet-mode {all,realistic,none}] [--require CLASSES] [-R] [-an LEVEL] [-nl LIMIT] [-y YEARS] [-d YEARS] [--date-formats FORMATS] [--seasons] [--months] [--lang LANGS] [--reverse] [-ap VALUES] [-cpb] [-cpa] [-cpo] [-o FILENAME] [-q] [--yes] [--no-color] [-u]
 ```
 The help dialog [ -h, --help ] includes usage details and examples.
 
@@ -130,6 +142,18 @@ The help dialog [ -h, --help ] includes usage details and examples.
 - **`--date-formats <formats>`** (default: `ddmmyyyy,ddmmyy,mmyyyy,ddmm,yyyy,yy`)  
   Comma‐separated date formats for `-d`. Available tokens: `ddmmyyyy, ddmmyy, mmddyyyy, mmddyy, yyyymmdd, mmyyyy, mmyy, ddmm, mmdd, yyyy, yy`.
 
+- **`--seasons`**  
+  Append season+year tokens to each mutation (e.g. `amazonSpring2024`), the common password‐expiry pattern. Requires `-y` for the year(s); both full and 2‐digit years are produced.
+
+- **`--months`**  
+  Append month+year tokens, full and abbreviated (e.g. `amazonJanuary2024`, `amazonJan2024`). Requires `-y`.
+
+- **`--lang <langs>`** (default: `en`)  
+  Comma‐separated languages for `--seasons`/`--months`. Available: `en, es` (e.g. `--lang en,es`).
+
+- **`--reverse`**  
+  Also mutate the reverse of each keyword (e.g. `amazon` → `nozama`); the reversed form receives the full set of mutations.
+
 - **`-ap, --append-padding <vals>`**  
   Append custom padding values (comma‐separated). Must be used with `-cpb` or `-cpa`.
 
@@ -143,16 +167,19 @@ The help dialog [ -h, --help ] includes usage details and examples.
   Use only user‐provided paddings (no defaults). Must be used with `-ap`.
 
 - **`-o, --output <file>`**  
-  Write the results to `<file>` (default: `output.txt`).
+  Write the results to `<file>` (default: `output.txt`). If the file already exists, psudohash warns before overwriting it.
 
 - **`-q, --quiet`**  
   Suppress the ASCII art banner on startup.
+
+- **`--yes`**  
+  Skip the confirmation prompt (assume yes). Useful for scripts and non‐interactive runs.
 
 - **`--no-color`**  
   Disable colored output. Colors are also auto-disabled when stdout is not a TTY (e.g. piped/redirected) or when the `NO_COLOR` environment variable is set.
 
 - **`-u, --unique`**  
-  Remove duplicate lines from the final wordlist (order-preserving). Adds a post-processing pass over the output file.
+  Remove duplicate lines from the final wordlist (order-preserving). Deduplication runs inline while writing, so the file is produced in a single pass.
 
 
 ### Usage Examples
@@ -218,6 +245,27 @@ The help dialog [ -h, --help ] includes usage details and examples.
     # Narrow the formats if you know the shape:
     ./psudohash.py -w pedro -d 1998 --date-formats mmyyyy -R
     # → pedro011998, pedro021998, ... pedro121998
+    ```
+
+11. **Season / month + year (password‐expiry pattern)**  
+    ```bash
+    ./psudohash.py -w amazon --seasons -y 2024 -R
+    # → amazonSpring2024, amazon_Spring2024, amazonWinter24, ...
+    # English + Spanish names, with months too:
+    ./psudohash.py -w amazon --seasons --months -y 2024 --lang en,es -R
+    # → ...amazonPrimavera2024, amazonEnero2024, amazonEne2024, ...
+    ```
+
+12. **Reverse the keyword**  
+    ```bash
+    ./psudohash.py -w amazon --reverse -R
+    # mutates both "amazon" and "nozama"
+    ```
+
+13. **Non‐interactive run (skip the prompt)**  
+    ```bash
+    ./psudohash.py -w amazon -R --yes -o creds.txt
+    # generates without asking for confirmation
     ```
 
 ## Usage Tips
