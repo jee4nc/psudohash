@@ -1,0 +1,8 @@
+[project]
+name = "psudohash"
+version = "0.1.0"
+description = "Keyword-based password wordlist generator for brute-force attacks (fork of t3l3machus/psudohash)"
+requires-python = ">=3.11"
+dependencies = [
+    "tqdm>=4.67.3",
+]

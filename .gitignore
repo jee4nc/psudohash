@@ -1,0 +1,14 @@
+# uv / virtualenv
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Generated wordlists
+output.txt
+*.wordlist
+
+# OS
+.DS_Store
