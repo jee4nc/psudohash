@@ -4,7 +4,13 @@
 # https://github.com/t3l3machus
 
 import argparse, sys, itertools
+from pathlib import Path
 from tqdm import tqdm
+
+# Resolve bundled data files relative to this script, not the CWD,
+# so the tool works regardless of the directory it's invoked from.
+SCRIPT_DIR = Path(__file__).resolve().parent
+PADDINGS_FILE = SCRIPT_DIR / 'common_padding_values.txt'
 
 # Colors
 MAIN = '\033[38;5;50m'
@@ -68,19 +74,22 @@ args = parser.parse_args()
 def exit_with_msg(msg):
     parser.print_help()
     print(f'\n[{RED}Debug{END}] {msg}\n')
-    sys.exit(1) 
+    sys.exit(1)
 
 
+def within_length(word):
+    """
+    Return True if `word` (without trailing newline) passes the configured
+    --minlen/--maxlen filters. Centralizing this avoids the off-by-one that
+    occurred when some stages measured the string including its '\\n'.
+    """
+    n = len(word)
+    if args.minlen and n < args.minlen:
+        return False
+    if args.maxlen and n > args.maxlen:
+        return False
+    return True
 
-def unique(l):
-  
-    unique_list = []
-
-    for i in l:
-        if i not in unique_list:
-            unique_list.append(i)
-    
-    return unique_list
 
 
 # Append numbering
@@ -192,13 +201,13 @@ if (args.custom_paddings_only or args.append_padding) and not (args.common_paddi
 elif (args.common_paddings_before or args.common_paddings_after) and not args.custom_paddings_only:
     
     try:
-        f = open('common_padding_values.txt', 'r')
-        content = f.readlines()
-        common_paddings = [val.strip() for val in content]
-        f.close()
+        with open(PADDINGS_FILE, 'r') as f:
+            common_paddings = [val.strip() for val in f.readlines()]
 
-    except:
-        exit_with_msg('File "common_padding_values.txt" not found.')
+    except FileNotFoundError:
+        exit_with_msg(f'File "{PADDINGS_FILE}" not found.')
+    except OSError as e:
+        exit_with_msg(f'Could not read "{PADDINGS_FILE}": {e}')
 
 elif (args.common_paddings_before or args.common_paddings_after) and (args.custom_paddings_only and args.append_padding):
     common_paddings = []
@@ -305,8 +314,7 @@ def mutations_handler(kword, trans_chars, total):
         for m in basic_mutations:
             # Only final‐filter if no numbering/years/padding follow
             if not args.append_numbering and not args.years and not (args.common_paddings_after or args.common_paddings_before):
-                if not (args.minlen and len(m) < args.minlen) \
-                   and not (args.maxlen and len(m) > args.maxlen):
+                if within_length(m):
                     wordlist.write(m + '\n')
             else:
                 wordlist.write(m + '\n')
@@ -340,8 +348,7 @@ def caseMutationsHandler(word, mutability):
                 if not args.combinations and not args.inorder \
                    and not args.append_numbering and not args.years \
                    and not (args.common_paddings_after or args.common_paddings_before):
-                    if not (args.minlen and len(m) < args.minlen) \
-                       and not (args.maxlen and len(m) > args.maxlen):
+                    if within_length(m):
                         wordlist.write(m + '\n')
                 else:
                     wordlist.write(m + '\n')
@@ -371,48 +378,25 @@ def append_numbering():
             for i in range(1, lvl + 1):
                 for k in range(1, _max):
                     num_z = str(k).zfill(i)
-                    line1 = f"{word}{num_z}\n"
-                    line2 = f"{word}_{num_z}\n"
+                    variant1 = f"{word}{num_z}"
+                    variant2 = f"{word}_{num_z}"
 
                     if first_cycle:
                         # Only final‐filter if no years or padding follow
-                        if not args.years and not (args.common_paddings_after or args.common_paddings_before):
-                            if not (args.minlen and len(line1) < args.minlen) \
-                               and not (args.maxlen and len(line1) > args.maxlen):
-                                wordlist.write(line1)
-                                pbar.update(1)
+                        follow = args.years or args.common_paddings_after or args.common_paddings_before
+                        for variant in (variant1, variant2):
+                            if not follow:
+                                if within_length(variant):
+                                    wordlist.write(variant + '\n')
                             else:
-                                pbar.update(1)
-                            if not (args.minlen and len(line2) < args.minlen) \
-                               and not (args.maxlen and len(line2) > args.maxlen):
-                                wordlist.write(line2)
-                                pbar.update(1)
-                            else:
-                                pbar.update(1)
-                        else:
-                            if not args.years and not (args.common_paddings_after or args.common_paddings_before):
-                                if not (args.minlen and len(line1) < args.minlen) \
-                                   and not (args.maxlen and len(line1) > args.maxlen):
-                                    wordlist.write(line1)
-                                    pbar.update(1)
-                                else:
-                                    pbar.update(1)
-                                if not (args.minlen and len(line2) < args.minlen) \
-                                   and not (args.maxlen and len(line2) > args.maxlen):
-                                    wordlist.write(line2)
-                                    pbar.update(1)
-                                else:
-                                    pbar.update(1)
-                            else:
-                                wordlist.write(line1)
-                                wordlist.write(line2)
-                                pbar.update(2)
-                        previous_list.append(f"{word}{num_z}")
+                                wordlist.write(variant + '\n')
+                            pbar.update(1)
+                        previous_list.append(variant1)
                     else:
-                        if previous_list[k - 1] != f"{word}{num_z}":
-                            wordlist.write(line1)
-                            wordlist.write(line2)
-                            previous_list[k - 1] = f"{word}{num_z}"
+                        if previous_list[k - 1] != variant1:
+                            wordlist.write(variant1 + '\n')
+                            wordlist.write(variant2 + '\n')
+                            previous_list[k - 1] = variant1
                             pbar.update(2)
 
                 first_cycle = False
@@ -437,27 +421,19 @@ def mutate_years():
         for word in current_mutations:
             for y in years:
                 for sep in year_seperators:
-                    full = f"{word}{sep}{y}\n"
-                    short = f"{word}{sep}{y[2:]}\n"
+                    full = f"{word}{sep}{y}"
+                    short = f"{word}{sep}{y[2:]}"
                     # Only final-filter if no padding follows
-                    if not (args.common_paddings_after or args.common_paddings_before):
-                        if not (args.minlen and len(full) < args.minlen) \
-                           and not (args.maxlen and len(full) > args.maxlen):
-                            wordlist.write(full)
-                            basic_mutations.append(full.strip())
-                        # count one for pbar regardless
+                    paddings_follow = args.common_paddings_after or args.common_paddings_before
+                    for variant in (full, short):
+                        if not paddings_follow:
+                            if within_length(variant):
+                                wordlist.write(variant + '\n')
+                                basic_mutations.append(variant)
+                        else:
+                            wordlist.write(variant + '\n')
+                            basic_mutations.append(variant)
                         pbar.update(1)
-                        if not (args.minlen and len(short) < args.minlen) \
-                           and not (args.maxlen and len(short) > args.maxlen):
-                            wordlist.write(short)
-                            basic_mutations.append(short.strip())
-                        pbar.update(1)
-                    else:
-                        wordlist.write(full)
-                        basic_mutations.append(full.strip())
-                        wordlist.write(short)
-                        basic_mutations.append(short.strip())
-                        pbar.update(2)
 
     print(f"{desc}... [100.0%]")
 
@@ -485,13 +461,14 @@ def append_paddings_before():
 
         for word in current_mutations:
             for val in common_paddings:
-                line1 = f"{val}{word}\n"
-                wordlist.write(line1)
-                pbar.update(1)
-
+                variants = [f"{val}{word}"]
                 if not check_underscore(val, -1):
-                    line2 = f"{val}_{word}\n"
-                    wordlist.write(line2)
+                    variants.append(f"{val}_{word}")
+
+                # Prepending paddings is always the final stage, so filter here.
+                for variant in variants:
+                    if within_length(variant):
+                        wordlist.write(variant + '\n')
                     pbar.update(1)
 
     print(f"{desc}... [100.0%]")
@@ -513,31 +490,18 @@ def append_paddings_after():
 
         for word in current_mutations:
             for val in common_paddings:
-                line1 = f"{word}{val}\n"
-                # Only final-filter if no before-padding
-                if not args.common_paddings_before:
-                    if not (args.minlen and len(line1) < args.minlen) \
-                       and not (args.maxlen and len(line1) > args.maxlen):
-                        wordlist.write(line1)
-                        pbar.update(1)
-                    else:
-                        pbar.update(1)
-                else:
-                    wordlist.write(line1)
-                    pbar.update(1)
-
+                variants = [f"{word}{val}"]
                 if not check_underscore(val, 0):
-                    line2 = f"{word}_{val}\n"
+                    variants.append(f"{word}_{val}")
+
+                for variant in variants:
+                    # Only final-filter if no before-padding follows this stage
                     if not args.common_paddings_before:
-                        if not (args.minlen and len(line2) < args.minlen) \
-                           and not (args.maxlen and len(line2) > args.maxlen):
-                            wordlist.write(line2)
-                            pbar.update(1)
-                        else:
-                            pbar.update(1)
+                        if within_length(variant):
+                            wordlist.write(variant + '\n')
                     else:
-                        wordlist.write(line2)
-                        pbar.update(1)
+                        wordlist.write(variant + '\n')
+                    pbar.update(1)
 
     print(f"{desc}... [100.0%]")
 
@@ -645,14 +609,10 @@ def check_mutability(word):
 
 
 
-def chill():
-    pass
-
-
-
 def main():
-    
-    banner() if not args.quiet else chill()
+
+    if not args.quiet:
+        banner()
     
     global basic_mutations, mutations_cage
 
