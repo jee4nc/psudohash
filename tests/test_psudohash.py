@@ -18,18 +18,51 @@ def test_within_length_inclusive_bounds():
     assert ph.within_length("abcdef", 5, 5) is False  # too long
 
 
-# ----------------( char_variants )---------------- #
-def test_char_variants_letter_with_leet():
-    assert ph.char_variants("a", T) == sorted({"A", "a", "@", "4"})
+# ----------------( case_forms )---------------- #
+def test_case_forms_all_count():
+    assert len(list(ph.case_forms("foo", "all"))) == 2 ** 3
 
 
-def test_char_variants_letter_without_leet():
-    assert ph.char_variants("m", T) == sorted({"M", "m"})
+def test_case_forms_realistic_single_word():
+    assert set(ph.case_forms("foo", "realistic")) == {"foo", "FOO", "Foo"}
 
 
-def test_char_variants_non_alpha_is_singleton():
-    assert ph.char_variants("_", T) == ["_"]
-    assert ph.char_variants("5", T) == ["5"]
+def test_case_forms_realistic_titlecases_segments():
+    # Title Case capitalizes each segment; Capitalize only the first letter.
+    out = set(ph.case_forms("foo_bar", "realistic"))
+    assert "Foo_Bar" in out   # title
+    assert "Foo_bar" in out   # capitalize
+
+
+# ----------------( leet_forms )---------------- #
+def test_leet_forms_none():
+    assert list(ph.leet_forms("amazon", T, "none")) == ["amazon"]
+
+
+def test_leet_forms_all_count():
+    # "aa": each position independently in [a, @, 4] -> 9 combos
+    assert len(list(ph.leet_forms("aa", T, "all"))) == 9
+
+
+def test_leet_forms_realistic_is_consistent():
+    # Both a's substituted together or not at all: aa, @@, 44 (no mixed "a@").
+    assert set(ph.leet_forms("aa", T, "realistic")) == {"aa", "@@", "44"}
+
+
+def test_leet_forms_realistic_replaces_all_cases():
+    assert "@m@zon" in set(ph.leet_forms("amazon", T, "realistic"))
+
+
+# ----------------( meets_complexity )---------------- #
+def test_meets_complexity_empty_passes():
+    assert ph.meets_complexity("abc", set()) is True
+
+
+def test_meets_complexity_all_classes():
+    assert ph.meets_complexity("Abc1!", {"lower", "upper", "digit", "special"}) is True
+    assert ph.meets_complexity("abc1!", {"upper"}) is False
+    assert ph.meets_complexity("Abcde", {"digit"}) is False
+    assert ph.meets_complexity("Abcd1", {"special"}) is False
 
 
 # ----------------( base_variants )---------------- #
@@ -53,6 +86,13 @@ def test_base_variants_contains_identity_and_full_leet():
     assert "foo" in out
     assert "f00" in out
     assert "FOO" in out
+
+
+def test_base_variants_realistic_is_smaller_and_a_subset():
+    full = set(ph.base_variants("amazon", T, "all", "all"))
+    realistic = set(ph.base_variants("amazon", T, "realistic", "realistic"))
+    assert 0 < len(realistic) < len(full)
+    assert realistic <= full  # realistic forms are a subset of the exhaustive set
 
 
 # ----------------( numbering_variants )---------------- #
@@ -107,6 +147,15 @@ def test_generate_keyword_maxlen_filters_uniformly():
     out = list(ph.generate_keyword("amazon", cfg))
     assert out, "expected some output"
     assert all(len(w) <= 7 for w in out)
+
+
+def test_generate_keyword_require_filters_emitted_but_not_pool():
+    # require=digit drops the bare base word but keeps year variants that
+    # gained a digit -> the pool must not be pruned by the complexity filter.
+    cfg = _cfg(years=["2020"], require={"digit"})
+    out = set(ph.generate_keyword("amazon", cfg))
+    assert "amazon" not in out       # no digit -> filtered
+    assert "amazon2020" in out       # base fed the year stage despite being filtered
 
 
 def test_generate_keyword_years_feed_paddings_not_numbering():

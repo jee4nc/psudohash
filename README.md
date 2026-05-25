@@ -24,9 +24,9 @@ System administrators and other employees often use a mutated version of the Com
 
 ## Customization
 ### Leet Character Substitution
-The script implements the following character substitution schema. You can add/modify character substitution mappings by editing the `transformations` list in `psudohash.py` and following the data structure presented below (default):
+The script implements the following character substitution schema. You can add/modify character substitution mappings by editing the `TRANSFORMATIONS` list in `psudohash.py` and following the data structure presented below (default):
 ```
-transformations = [
+TRANSFORMATIONS = [
 	{'a' : ['@', '4']},
 	{'b' : '8'},
 	{'e' : '3'},
@@ -41,9 +41,9 @@ transformations = [
 When setting passwords, I believe it's pretty standard to add a sequence of characters before and/or after the main passphrase to make it "stronger". For example, one may set a password "dragon" and add a value like "!!!" or "!@#" at the end, resulting in "dragon!!!", "dragon!@#", etc. Psudohash reads such values from `common_padding_values.txt` and uses them to mutate the provided keywords by appending them before (`-cpb`) or after (`-cpa`) each generated keyword variation. You can modify it as you see fit.
 
 ### Year Values
-When appending a year value to a mutated keyword, psudohash will do so by utilizing various seperators. by default, it will use the following seperators which you can modify by editing the `year_seperators` list:  
+When appending a year value to a mutated keyword, psudohash will do so by utilizing various separators. By default, it will use the following separators which you can modify by editing the `YEAR_SEPARATORS` list:  
 ```
-year_seperators = ['', '_', '-', '@']
+YEAR_SEPARATORS = ['', '_', '-', '@']
 ```
 For example, if the given keyword is "amazon" and option `-y 2023` was used, the output will include "amazon2023", "amazon_2023", "amazon-2023", "amazon@2023", "amazon23", "amazon_23", "amazon-23", "amazon@23".
 
@@ -76,7 +76,7 @@ uv run pytest
 
 ## Usage
 ```
-./psudohash.py [-h] -w WORDS [-i] [-c] [--sep SEP] [--max-combine N] [--minlen N] [--maxlen N] [-an LEVEL] [-nl LIMIT] [-y YEARS] [-ap VALUES] [-cpb] [-cpa] [-cpo] [-o FILENAME] [-q] [--no-color] [-u]
+./psudohash.py [-h] -w WORDS [-i] [-c] [--sep SEP] [--max-combine N] [--minlen N] [--maxlen N] [--case-mode {all,realistic}] [--leet-mode {all,realistic,none}] [--require CLASSES] [-R] [-an LEVEL] [-nl LIMIT] [-y YEARS] [-ap VALUES] [-cpb] [-cpa] [-cpo] [-o FILENAME] [-q] [--no-color] [-u]
 ```
 The help dialog [ -h, --help ] includes usage details and examples.
 
@@ -102,6 +102,18 @@ The help dialog [ -h, --help ] includes usage details and examples.
 
 - **`--maxlen <N>`**  
   Discard any final password longer than N characters.
+
+- **`--case-mode {all,realistic}`** (default: `all`)  
+  Case variation strategy. `all` produces every upper/lower combination (e.g. `aMaZoN`); `realistic` produces only the forms humans actually use: all-lower, ALL-UPPER, Capitalized and Title Case.
+
+- **`--leet-mode {all,realistic,none}`** (default: `all`)  
+  Leet substitution strategy. `all` is every per-character keep/substitute combination; `realistic` is consistent (each letter is left alone or replaced in *all* its occurrences); `none` disables leet.
+
+- **`--require <classes>`**  
+  Keep only passwords containing at least one of each comma-separated character class: `lower,upper,digit,special`. Useful to match a target's password policy and avoid wasting guesses (e.g. `--require upper,digit,special`).
+
+- **`-R, --realistic`**  
+  Preset enabling human-like mutations (`--case-mode realistic` **and** `--leet-mode realistic`). Produces a far smaller, higher-signal wordlist. For `amazon` this drops the base mutations from 384 to 14.
 
 - **`-an, --append-numbering <LEVEL>`**  
   Append numbered suffixes (zero‐padded to `<LEVEL>` digits) to each word mutation.
@@ -179,6 +191,18 @@ The help dialog [ -h, --help ] includes usage details and examples.
    ```bash
    ./psudohash.py -w amazon -y 2022 -an 1 --unique
    # Removes any duplicate mutations from output.txt
+   ```
+
+8. **Realistic, human-like mutations (smaller, higher-signal list)**  
+   ```bash
+   ./psudohash.py -w amazon --realistic
+   # → amazon, Amazon, AMAZON, @m@zon, amaz0n, 4m4z0n, ...  (14 vs 384)
+   ```
+
+9. **Match a target password policy**  
+   ```bash
+   ./psudohash.py -w amazon -R -y 2024 --require upper,digit --minlen 8
+   # Only candidates with an uppercase letter AND a digit, length >= 8
    ```
 
 ## Usage Tips

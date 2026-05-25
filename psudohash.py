@@ -55,26 +55,106 @@ def within_length(word, minlen, maxlen):
     return True
 
 
-def char_variants(char, transformations):
-    """All variants of a single character: upper, lower and any leet subs."""
-    variants = {char.upper(), char.lower()}
-    low = char.lower()
+COMPLEXITY_CLASSES = ('lower', 'upper', 'digit', 'special')
+
+
+def meets_complexity(word, required):
+    """
+    Return True if `word` contains at least one character of every class named
+    in `required` (a set drawn from COMPLEXITY_CLASSES). Empty/None means no
+    requirement.
+    """
+    if not required:
+        return True
+    if 'lower' in required and not any(c.islower() for c in word):
+        return False
+    if 'upper' in required and not any(c.isupper() for c in word):
+        return False
+    if 'digit' in required and not any(c.isdigit() for c in word):
+        return False
+    if 'special' in required and not any(not c.isalnum() for c in word):
+        return False
+    return True
+
+
+def _leet_subs(low, transformations):
+    """Return the list of leet substitutions for a lowercase character, or []."""
     for t in transformations:
         if low in t:
             sub = t[low]
-            variants.update(sub if isinstance(sub, list) else [sub])
-    return sorted(variants)
+            return sub if isinstance(sub, list) else [sub]
+    return []
 
 
-def base_variants(word, transformations):
+def case_forms(word, mode):
     """
-    Yield every case- and leet-based variant of `word`. Each character position
-    independently contributes its upper/lower forms plus any leet substitutions,
-    so the result is the Cartesian product across positions (no duplicates).
+    Yield case variations of `word`.
+      - "all":       every per-character upper/lower combination (2**letters).
+      - "realistic": only the forms humans actually use — all-lower, ALL-UPPER,
+                     Capitalized and Title Case (per-segment capitalization).
     """
-    options = [char_variants(ch, transformations) for ch in word]
+    if mode == 'realistic':
+        seen = set()
+        for form in (word.lower(), word.upper(), word.capitalize(), word.title()):
+            if form not in seen:
+                seen.add(form)
+                yield form
+    else:  # "all"
+        options = [sorted({ch.upper(), ch.lower()}) for ch in word]
+        for combo in itertools.product(*options):
+            yield ''.join(combo)
+
+
+def leet_forms(word, transformations, mode):
+    """
+    Yield leet (character→symbol) variations of `word`.
+      - "none":      no substitution, just the word itself.
+      - "all":       every per-character combination of keep/substitute.
+      - "realistic": consistent substitution — each substitutable letter is
+                     either left alone or replaced in ALL its occurrences by one
+                     of its symbols (how humans actually leet-speak).
+    """
+    if mode == 'none':
+        yield word
+        return
+
+    if mode == 'realistic':
+        # One choice per distinct substitutable letter, applied to every occurrence.
+        letters, choices = [], []
+        for low in dict.fromkeys(ch.lower() for ch in word):
+            subs = _leet_subs(low, transformations)
+            if subs:
+                letters.append(low)
+                choices.append([None, *subs])  # None == keep
+        seen = set()
+        for combo in itertools.product(*choices) if choices else [()]:
+            result = word
+            for low, choice in zip(letters, combo):
+                if choice is not None:
+                    result = result.replace(low, choice).replace(low.upper(), choice)
+            if result not in seen:
+                seen.add(result)
+                yield result
+        return
+
+    # "all": independent keep/substitute per character position.
+    options = [[ch, *_leet_subs(ch.lower(), transformations)] for ch in word]
     for combo in itertools.product(*options):
         yield ''.join(combo)
+
+
+def base_variants(word, transformations, case_mode='all', leet_mode='all'):
+    """
+    Yield every case- and leet-based variant of `word` by composing the chosen
+    case mode with the chosen leet mode. Duplicates are removed. The defaults
+    (all/all) reproduce the original per-character Cartesian product.
+    """
+    seen = set()
+    for cased in case_forms(word, case_mode):
+        for leeted in leet_forms(cased, transformations, leet_mode):
+            if leeted not in seen:
+                seen.add(leeted)
+                yield leeted
 
 
 def numbering_variants(word, level, count_max):
@@ -127,9 +207,9 @@ def generate_keyword(keyword, cfg):
     behaviour); year variants are.
     """
     def ok(w):
-        return within_length(w, cfg.minlen, cfg.maxlen)
+        return within_length(w, cfg.minlen, cfg.maxlen) and meets_complexity(w, cfg.require)
 
-    base = list(base_variants(keyword, TRANSFORMATIONS))
+    base = list(base_variants(keyword, TRANSFORMATIONS, cfg.case_mode, cfg.leet_mode))
 
     for w in base:
         if ok(w):
@@ -191,10 +271,12 @@ def deduplicate_file(path):
 class Config:
     """Resolved run settings derived from parsed CLI arguments."""
     __slots__ = ('minlen', 'maxlen', 'numbering_level', 'numbering_max',
-                 'years', 'paddings', 'pad_after', 'pad_before')
+                 'years', 'paddings', 'pad_after', 'pad_before',
+                 'case_mode', 'leet_mode', 'require')
 
     def __init__(self, minlen, maxlen, numbering_level, numbering_max,
-                 years, paddings, pad_after, pad_before):
+                 years, paddings, pad_after, pad_before,
+                 case_mode='all', leet_mode='all', require=None):
         self.minlen = minlen
         self.maxlen = maxlen
         self.numbering_level = numbering_level
@@ -203,6 +285,9 @@ class Config:
         self.paddings = paddings
         self.pad_after = pad_after
         self.pad_before = pad_before
+        self.case_mode = case_mode
+        self.leet_mode = leet_mode
+        self.require = require or set()
 
 
 def build_parser():
@@ -240,6 +325,10 @@ Usage examples:
     parser.add_argument("--minlen", type=int, help="Minimum length (inclusive) of any resulting password. Mutations shorter than this are skipped.")
     parser.add_argument("--maxlen", type=int, help="Maximum length (inclusive) of any resulting password. Mutations longer than this are skipped.")
     parser.add_argument("--sep", type=str, default="", help="Separator to insert between joined keywords (default: no separator).")
+    parser.add_argument("--case-mode", choices=['all', 'realistic'], default='all', help="Case variation strategy.\n  all       = every upper/lower combination (default, e.g. aMaZoN).\n  realistic = only forms humans use: lower, UPPER, Capitalized, Title Case.")
+    parser.add_argument("--leet-mode", choices=['all', 'realistic', 'none'], default='all', help="Leet (char→symbol) substitution strategy.\n  all       = every per-character keep/substitute combination (default).\n  realistic = consistent: each letter is left alone or replaced everywhere.\n  none      = no leet substitution.")
+    parser.add_argument("--require", type=str, metavar='CLASSES', help="Keep only passwords containing at least one of each comma-separated\ncharacter class: lower,upper,digit,special (e.g. --require upper,digit,special).")
+    parser.add_argument("-R", "--realistic", action="store_true", help="Preset that enables human-like mutations: --case-mode realistic AND\n--leet-mode realistic. Produces a much smaller, higher-signal wordlist.")
     parser.add_argument("-an", "--append-numbering", action="store", help="Append numbering range at the end of each word mutation (before appending year or common paddings).\nThe LEVEL value represents the minimum number of digits. LEVEL must be >= 1. \nSet to 1 will append range: 1,2,3..100\nSet to 2 will append range: 01,02,03..100 + previous\nSet to 3 will append range: 001,002,003..100 + previous.\n\n", type=int, metavar='LEVEL')
     parser.add_argument("-nl", "--numbering-limit", action="store", help="Change max numbering limit value of option -an. Default is 50. Must be used with -an.", type=int, metavar='LIMIT')
     parser.add_argument("-y", "--years", action="store", help="Single OR comma separated OR range of years to be appended to each word mutation (Example: 2022 OR 1990,2017,2022 OR 1990-2000)")
@@ -418,6 +507,21 @@ def main():
     years = parse_years(parser, args.years) if args.years else []
     paddings = load_paddings(parser, args)
 
+    # The --realistic preset is shorthand for realistic case + realistic leet.
+    case_mode = 'realistic' if args.realistic else args.case_mode
+    leet_mode = 'realistic' if args.realistic else args.leet_mode
+
+    require = set()
+    if args.require:
+        for cls in args.require.split(','):
+            cls = cls.strip().lower()
+            if cls == '':
+                continue
+            if cls not in COMPLEXITY_CLASSES:
+                exit_with_msg(parser, f'Unknown character class "{cls}" for --require. '
+                                      f'Choose from: {", ".join(COMPLEXITY_CLASSES)}.')
+            require.add(cls)
+
     keywords = build_keywords(args)
     if keywords is None:
         exit_with_msg(parser, 'Unable to mutate digit-only keywords.')
@@ -431,6 +535,9 @@ def main():
         paddings=paddings,
         pad_after=args.common_paddings_after or args.custom_paddings_only,
         pad_before=args.common_paddings_before,
+        case_mode=case_mode,
+        leet_mode=leet_mode,
+        require=require,
     )
 
     outfile = args.output if args.output else 'output.txt'
