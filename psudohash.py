@@ -3,7 +3,7 @@
 # Author: Panagiotis Chartas (t3l3machus)
 # https://github.com/t3l3machus
 
-import argparse, sys, itertools
+import argparse, os, sys, itertools
 from pathlib import Path
 from tqdm import tqdm
 
@@ -52,7 +52,7 @@ Usage examples:
 '''
     )
 
-parser.add_argument("-w", "--words", action="store", help = "Comma seperated keywords to mutate", required = True)
+parser.add_argument("-w", "--words", action="store", help = "Comma separated keywords to mutate", required = True)
 parser.add_argument("-i", "--inorder", action="store_true", help="Join keywords only in the order given: for each 1≤r≤max_combine, concatenate each r-subset in original sequence.")
 parser.add_argument("-c", "--combinations", action="store_true", help="Generate every ordering of every subset (up to max_combine) of the provided keywords.")
 parser.add_argument("--max-combine", type=int, default=2, help="Maximum number of raw keywords to join into one base string (default: 2). Applies when using -i or -c.")
@@ -61,15 +61,24 @@ parser.add_argument("--maxlen", type=int, help="Maximum length (inclusive) of an
 parser.add_argument("--sep", type=str, default="", help="Separator to insert between joined keywords (default: no separator).")
 parser.add_argument("-an", "--append-numbering", action="store", help = "Append numbering range at the end of each word mutation (before appending year or common paddings).\nThe LEVEL value represents the minimum number of digits. LEVEL must be >= 1. \nSet to 1 will append range: 1,2,3..100\nSet to 2 will append range: 01,02,03..100 + previous\nSet to 3 will append range: 001,002,003..100 + previous.\n\n", type = int, metavar='LEVEL')
 parser.add_argument("-nl", "--numbering-limit", action="store", help = "Change max numbering limit value of option -an. Default is 50. Must be used with -an.", type = int, metavar='LIMIT')
-parser.add_argument("-y", "--years", action="store", help = "Singe OR comma seperated OR range of years to be appended to each word mutation (Example: 2022 OR 1990,2017,2022 OR 1990-2000)")
-parser.add_argument("-ap", "--append-padding", action="store", help = "Add comma seperated values to common paddings (must be used with -cpb OR -cpa)", metavar='VALUES')
+parser.add_argument("-y", "--years", action="store", help = "Single OR comma separated OR range of years to be appended to each word mutation (Example: 2022 OR 1990,2017,2022 OR 1990-2000)")
+parser.add_argument("-ap", "--append-padding", action="store", help = "Add comma separated values to common paddings (must be used with -cpb OR -cpa)", metavar='VALUES')
 parser.add_argument("-cpb", "--common-paddings-before", action="store_true", help = "Append common paddings before each mutated word") 
 parser.add_argument("-cpa", "--common-paddings-after", action="store_true", help = "Append common paddings after each mutated word") 
 parser.add_argument("-cpo", "--custom-paddings-only", action="store_true", help = "Use only user provided paddings for word mutations (must be used with -ap AND (-cpb OR -cpa))") 
 parser.add_argument("-o", "--output", action="store", help = "Output filename (default: output.txt)", metavar='FILENAME')
 parser.add_argument("-q", "--quiet", action="store_true", help = "Do not print the banner on startup")
+parser.add_argument("--no-color", action="store_true", help = "Disable colored output (also auto-disabled when stdout is not a TTY or NO_COLOR is set)")
+parser.add_argument("-u", "--unique", action="store_true", help = "Remove duplicate lines from the final wordlist (order-preserving). Adds a post-processing pass.")
 
 args = parser.parse_args()
+
+# Disable ANSI colors when requested, when piped/redirected, or when the
+# NO_COLOR convention (https://no-color.org) is set, so escape codes don't
+# leak into files or non-TTY consumers.
+USE_COLOR = not (args.no_color or os.environ.get('NO_COLOR') is not None or not sys.stdout.isatty())
+if not USE_COLOR:
+    MAIN = LOGO = LOGO2 = GREEN = ORANGE = PRPL = PRPL2 = RED = END = BOLD = ''
 
 def exit_with_msg(msg):
     parser.print_help()
@@ -155,7 +164,7 @@ def banner():
     for charset in range(0, 3):
         for pos in range(0, len(banner)):
             for i in range(0, len(banner[pos][charset])):
-                clr = f'\033[38;5;{txt_color}m'
+                clr = f'\033[38;5;{txt_color}m' if USE_COLOR else ''
                 char = f'{clr}{banner[pos][charset][i]}'
                 final.append(char)
                 cl += 1
@@ -230,31 +239,23 @@ if (args.common_paddings_before or args.common_paddings_after):
 
 # ----------------( Functions )---------------- #
 # The following list is used to create variations of password values and appended years.
-# For example, a passwd value {passwd} will be mutated to "{passwd}{seperator}{year}"
+# For example, a passwd value {passwd} will be mutated to "{passwd}{separator}{year}"
 # for each of the symbols included in the list below.
-year_seperators = ['', '_', '-', '@']
+year_separators = ['', '_', '-', '@']
 
 
 
 # ----------------( Functions )---------------- #
 def evalTransformations(w):
-    
+    """Return the indices of characters in `w` that have leet substitutions."""
     trans_chars = []
-    total = 1
-    c = 0   
-    w = list(w)
-    
-    for char in w:
+
+    for c, char in enumerate(w):
         for t in transformations:
             if char in t.keys():
                 trans_chars.append(c)
-                if isinstance(t[char], list):
-                    total *= 3
-                else:
-                    total *= 2
-        c += 1
-            
-    return [trans_chars, total]
+
+    return trans_chars
 
         
 
@@ -288,7 +289,7 @@ def mutate(tc, word):
     
 
 
-def mutations_handler(kword, trans_chars, total):
+def mutations_handler(kword, trans_chars):
     """
     Perform character→symbol/number substitutions and write each new mutation.
     """
@@ -411,8 +412,8 @@ def mutate_years():
     global basic_mutations
     current_mutations = basic_mutations.copy()
 
-    # total lines = len(current_mutations) * len(years) * len(year_seperators) * 2
-    total_lines = len(current_mutations) * len(years) * len(year_seperators) * 2
+    # total lines = len(current_mutations) * len(years) * len(year_separators) * 2
+    total_lines = len(current_mutations) * len(years) * len(year_separators) * 2
     desc = " ├─ Appending year patterns after each word mutation"
 
     with open(outfile, 'a') as wordlist, \
@@ -420,7 +421,7 @@ def mutate_years():
 
         for word in current_mutations:
             for y in years:
-                for sep in year_seperators:
+                for sep in year_separators:
                     full = f"{word}{sep}{y}"
                     short = f"{word}{sep}{y[2:]}"
                     # Only final-filter if no padding follows
@@ -562,13 +563,13 @@ def calculate_output(keyw):
         
     # Adding years mutations calc
     if args.years:
-        patterns = len(year_seperators) * 2
+        patterns = len(year_separators) * 2
         year_chars = 4
         year_short = 2
         years_len = len(years)
         size += (basic_size * patterns * years_len)
 
-        for sep in year_seperators:
+        for sep in year_separators:
             size += (basic_total * (year_chars + len(sep)) * years_len)
             size += (basic_total * (year_short  + len(sep)) * years_len)
 
@@ -607,6 +608,30 @@ def check_mutability(word):
     
     return m
 
+
+
+def deduplicate_file(path):
+    """
+    Remove duplicate lines from `path` in place, preserving first-seen order.
+    Streams line by line through a temp file, holding only a set of seen
+    lines in memory (one entry per unique word).
+    Returns (kept, removed) counts.
+    """
+    seen = set()
+    kept = removed = 0
+    tmp_path = f'{path}.dedup.tmp'
+
+    with open(path, 'r') as src, open(tmp_path, 'w') as dst:
+        for line in src:
+            if line in seen:
+                removed += 1
+                continue
+            seen.add(line)
+            dst.write(line)
+            kept += 1
+
+    os.replace(tmp_path, path)
+    return kept, removed
 
 
 def main():
@@ -668,11 +693,11 @@ def main():
         prompt = (f'[{ORANGE}Warning{END}] This operation will produce {BOLD}{total_size[0]}{END} words, {BOLD}{fsize}{END}. Are you sure you want to proceed? [y/n]: ')
 
     try:
-        concent = input(prompt)
+        consent = input(prompt)
     except KeyboardInterrupt:
         exit('\n')
     
-    if concent.lower() not in ['y', 'yes']:
+    if consent.lower() not in ['y', 'yes']:
         sys.exit(f'\n[{RED}X{END}] Aborting.')
         
     else:
@@ -687,8 +712,8 @@ def main():
             caseMutationsHandler(word.lower(), mutability)
             # Stage 2: Substitution mutations
             if mutability:
-                trans = evalTransformations(word.lower())
-                mutations_handler(word, trans[0], trans[1])
+                trans_chars = evalTransformations(word.lower())
+                mutations_handler(word, trans_chars)
             else:
                 print(f" ├─ {ORANGE}No character substitution instructions match this word.{END}")
             # Stage 3: Numbering
@@ -706,7 +731,11 @@ def main():
             basic_mutations = []
             mutations_cage = []
             print(f' └─ Done!')
-        
+
+        if args.unique:
+            kept, removed = deduplicate_file(outfile)
+            print(f'[{MAIN}Info{END}] Removed {removed} duplicate(s); {kept} unique words remain.')
+
         print(f'\n[{MAIN}Info{END}] Completed! List saved in {outfile}\n')
             
 

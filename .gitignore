@@ -12,3 +12,12 @@ output.txt
 
 # OS
 .DS_Store
+
+# AI assistants / Claude
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.cursor/
+.cursorrules
+.aider*
+.github/copilot-instructions.md

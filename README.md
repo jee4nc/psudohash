@@ -61,7 +61,7 @@ chmod +x psudohash.py
 ```  
 ## Usage
 ```
-./psudohash.py [-h] -w WORDS [-i] [-c] [--sep SEP] [--max-combine N] [-an LEVEL] [-nl LIMIT] [-y YEARS] [-ap VALUES] [-cpb] [-cpa] [-cpo] [-o FILENAME] [-q]
+./psudohash.py [-h] -w WORDS [-i] [-c] [--sep SEP] [--max-combine N] [--minlen N] [--maxlen N] [-an LEVEL] [-nl LIMIT] [-y YEARS] [-ap VALUES] [-cpb] [-cpa] [-cpo] [-o FILENAME] [-q] [--no-color] [-u]
 ```
 The help dialog [ -h, --help ] includes usage details and examples.
 
@@ -115,6 +115,12 @@ The help dialog [ -h, --help ] includes usage details and examples.
 - **`-q, --quiet`**  
   Suppress the ASCII art banner on startup.
 
+- **`--no-color`**  
+  Disable colored output. Colors are also auto-disabled when stdout is not a TTY (e.g. piped/redirected) or when the `NO_COLOR` environment variable is set.
+
+- **`-u, --unique`**  
+  Remove duplicate lines from the final wordlist (order-preserving). Adds a post-processing pass over the output file.
+
 
 ### Usage Examples
 
@@ -150,6 +156,16 @@ The help dialog [ -h, --help ] includes usage details and examples.
    ```
 
 6. **Combine up to 3 words (instead of default 2)**  
+   ```bash
+   ./psudohash.py -w foo,bar,baz -i --max-combine 3
+   # → foo, bar, baz, foobar, foobaz, barbaz, foobarbaz
+   ```
+
+7. **Deduplicated output**  
+   ```bash
+   ./psudohash.py -w amazon -y 2022 -an 1 --unique
+   # Removes any duplicate mutations from output.txt
+   ```
 
 ## Usage Tips
 1. Combining options `--years` and `--append-numbering` with a `--numbering-limit` ≥ last two digits of any year input, will most likely produce duplicate words because of the mutation patterns implemented by the tool. 
