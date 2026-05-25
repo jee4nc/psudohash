@@ -2,6 +2,9 @@
 #
 # Author: Panagiotis Chartas (t3l3machus)
 # https://github.com/t3l3machus
+#
+# Fork: refactored to a generator-based pipeline (no global mutable state)
+# with a single source of truth for the output count.
 
 import argparse, os, sys, itertools
 from pathlib import Path
@@ -12,7 +15,7 @@ from tqdm import tqdm
 SCRIPT_DIR = Path(__file__).resolve().parent
 PADDINGS_FILE = SCRIPT_DIR / 'common_padding_values.txt'
 
-# Colors
+# Colors (zeroed out by main() when color is disabled)
 MAIN = '\033[38;5;50m'
 LOGO = '\033[38;5;41m'
 LOGO2 = '\033[38;5;42m'
@@ -23,11 +26,189 @@ PRPL2 = '\033[0;38;5;25m'
 RED = '\033[1;31m'
 END = '\033[0m'
 BOLD = '\033[1m'
+USE_COLOR = True
 
-# -------------- Arguments & Usage -------------- #
-parser = argparse.ArgumentParser(
-    formatter_class=argparse.RawTextHelpFormatter,
-    epilog='''
+# Character -> symbol/number (leet) substitution schema. Edit to taste.
+TRANSFORMATIONS = [
+    {'a': ['@', '4']},
+    {'b': '8'},
+    {'e': '3'},
+    {'g': ['9', '6']},
+    {'i': ['1', '!']},
+    {'o': '0'},
+    {'s': ['$', '5']},
+    {'t': '7'},
+]
+
+# Separators inserted between a mutated word and an appended year.
+YEAR_SEPARATORS = ['', '_', '-', '@']
+
+
+# ----------------( Pure generation helpers )---------------- #
+def within_length(word, minlen, maxlen):
+    """Return True if `word` (without trailing newline) passes the length filters."""
+    n = len(word)
+    if minlen and n < minlen:
+        return False
+    if maxlen and n > maxlen:
+        return False
+    return True
+
+
+def char_variants(char, transformations):
+    """All variants of a single character: upper, lower and any leet subs."""
+    variants = {char.upper(), char.lower()}
+    low = char.lower()
+    for t in transformations:
+        if low in t:
+            sub = t[low]
+            variants.update(sub if isinstance(sub, list) else [sub])
+    return sorted(variants)
+
+
+def base_variants(word, transformations):
+    """
+    Yield every case- and leet-based variant of `word`. Each character position
+    independently contributes its upper/lower forms plus any leet substitutions,
+    so the result is the Cartesian product across positions (no duplicates).
+    """
+    options = [char_variants(ch, transformations) for ch in word]
+    for combo in itertools.product(*options):
+        yield ''.join(combo)
+
+
+def numbering_variants(word, level, count_max):
+    """
+    Yield numbering suffixes for `word`: for each digit width 1..level and each
+    number 1..count_max-1, both "<word><n>" and "<word>_<n>" (zero-padded).
+    """
+    for width in range(1, level + 1):
+        for k in range(1, count_max):
+            num = str(k).zfill(width)
+            yield f"{word}{num}"
+            yield f"{word}_{num}"
+
+
+def year_variants(word, years, separators):
+    """Yield "<word><sep><YYYY>" and "<word><sep><YY>" for each year/separator."""
+    for y in years:
+        for sep in separators:
+            yield f"{word}{sep}{y}"
+            yield f"{word}{sep}{y[2:]}"
+
+
+def paddings_after(word, paddings):
+    """Yield "<word><pad>" and (unless pad starts with '_') "<word>_<pad>"."""
+    for val in paddings:
+        yield f"{word}{val}"
+        if not val.startswith('_'):
+            yield f"{word}_{val}"
+
+
+def paddings_before(word, paddings):
+    """Yield "<pad><word>" and (unless pad ends with '_') "<pad>_<word>"."""
+    for val in paddings:
+        yield f"{val}{word}"
+        if not val.endswith('_'):
+            yield f"{val}_{word}"
+
+
+def generate_keyword(keyword, cfg):
+    """
+    Yield every final mutation for a single keyword, applying length filtering
+    uniformly to each emitted word. Stages mirror the original tool:
+
+      1. base (case + leet) variants            -> always
+      2. numbering suffixes (from base)         -> if -an
+      3. year suffixes (from base, fed forward) -> if -y
+      4. paddings after / before (from base + year variants) -> if -cpa / -cpb
+
+    Numbering variants are not fed into the padding stage (matching the original
+    behaviour); year variants are.
+    """
+    def ok(w):
+        return within_length(w, cfg.minlen, cfg.maxlen)
+
+    base = list(base_variants(keyword, TRANSFORMATIONS))
+
+    for w in base:
+        if ok(w):
+            yield w
+
+    if cfg.numbering_level:
+        for w in base:
+            for v in numbering_variants(w, cfg.numbering_level, cfg.numbering_max):
+                if ok(v):
+                    yield v
+
+    # Pool that the padding stages operate on: base words plus year variants.
+    pool = base
+    if cfg.years:
+        pool = list(base)
+        for w in base:
+            for v in year_variants(w, cfg.years, YEAR_SEPARATORS):
+                if ok(v):
+                    yield v
+                pool.append(v)
+
+    if cfg.pad_after:
+        for w in pool:
+            for v in paddings_after(w, cfg.paddings):
+                if ok(v):
+                    yield v
+
+    if cfg.pad_before:
+        for w in pool:
+            for v in paddings_before(w, cfg.paddings):
+                if ok(v):
+                    yield v
+
+
+def deduplicate_file(path):
+    """
+    Remove duplicate lines from `path` in place, preserving first-seen order.
+    Streams line by line through a temp file, holding only a set of seen lines
+    in memory. Returns (kept, removed) counts.
+    """
+    seen = set()
+    kept = removed = 0
+    tmp_path = f'{path}.dedup.tmp'
+
+    with open(path, 'r') as src, open(tmp_path, 'w') as dst:
+        for line in src:
+            if line in seen:
+                removed += 1
+                continue
+            seen.add(line)
+            dst.write(line)
+            kept += 1
+
+    os.replace(tmp_path, path)
+    return kept, removed
+
+
+# ----------------( CLI / configuration )---------------- #
+class Config:
+    """Resolved run settings derived from parsed CLI arguments."""
+    __slots__ = ('minlen', 'maxlen', 'numbering_level', 'numbering_max',
+                 'years', 'paddings', 'pad_after', 'pad_before')
+
+    def __init__(self, minlen, maxlen, numbering_level, numbering_max,
+                 years, paddings, pad_after, pad_before):
+        self.minlen = minlen
+        self.maxlen = maxlen
+        self.numbering_level = numbering_level
+        self.numbering_max = numbering_max
+        self.years = years
+        self.paddings = paddings
+        self.pad_after = pad_after
+        self.pad_before = pad_before
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog='''
 Usage examples:
 
   # 1) No multi-word: treat each keyword separately
@@ -50,111 +231,137 @@ Usage examples:
       python3 psudohash.py -w foo,bar,baz -i --max-combine 3
       # → foo, bar, baz, foobar, foobaz, barbaz, foobarbaz, ...
 '''
-    )
+        )
 
-parser.add_argument("-w", "--words", action="store", help = "Comma separated keywords to mutate", required = True)
-parser.add_argument("-i", "--inorder", action="store_true", help="Join keywords only in the order given: for each 1≤r≤max_combine, concatenate each r-subset in original sequence.")
-parser.add_argument("-c", "--combinations", action="store_true", help="Generate every ordering of every subset (up to max_combine) of the provided keywords.")
-parser.add_argument("--max-combine", type=int, default=2, help="Maximum number of raw keywords to join into one base string (default: 2). Applies when using -i or -c.")
-parser.add_argument("--minlen", type=int, help="Minimum length (inclusive) of any resulting password. Mutations shorter than this are skipped.")
-parser.add_argument("--maxlen", type=int, help="Maximum length (inclusive) of any resulting password. Mutations longer than this are skipped.")
-parser.add_argument("--sep", type=str, default="", help="Separator to insert between joined keywords (default: no separator).")
-parser.add_argument("-an", "--append-numbering", action="store", help = "Append numbering range at the end of each word mutation (before appending year or common paddings).\nThe LEVEL value represents the minimum number of digits. LEVEL must be >= 1. \nSet to 1 will append range: 1,2,3..100\nSet to 2 will append range: 01,02,03..100 + previous\nSet to 3 will append range: 001,002,003..100 + previous.\n\n", type = int, metavar='LEVEL')
-parser.add_argument("-nl", "--numbering-limit", action="store", help = "Change max numbering limit value of option -an. Default is 50. Must be used with -an.", type = int, metavar='LIMIT')
-parser.add_argument("-y", "--years", action="store", help = "Single OR comma separated OR range of years to be appended to each word mutation (Example: 2022 OR 1990,2017,2022 OR 1990-2000)")
-parser.add_argument("-ap", "--append-padding", action="store", help = "Add comma separated values to common paddings (must be used with -cpb OR -cpa)", metavar='VALUES')
-parser.add_argument("-cpb", "--common-paddings-before", action="store_true", help = "Append common paddings before each mutated word") 
-parser.add_argument("-cpa", "--common-paddings-after", action="store_true", help = "Append common paddings after each mutated word") 
-parser.add_argument("-cpo", "--custom-paddings-only", action="store_true", help = "Use only user provided paddings for word mutations (must be used with -ap AND (-cpb OR -cpa))") 
-parser.add_argument("-o", "--output", action="store", help = "Output filename (default: output.txt)", metavar='FILENAME')
-parser.add_argument("-q", "--quiet", action="store_true", help = "Do not print the banner on startup")
-parser.add_argument("--no-color", action="store_true", help = "Disable colored output (also auto-disabled when stdout is not a TTY or NO_COLOR is set)")
-parser.add_argument("-u", "--unique", action="store_true", help = "Remove duplicate lines from the final wordlist (order-preserving). Adds a post-processing pass.")
+    parser.add_argument("-w", "--words", action="store", help="Comma separated keywords to mutate", required=True)
+    parser.add_argument("-i", "--inorder", action="store_true", help="Join keywords only in the order given: for each 1≤r≤max_combine, concatenate each r-subset in original sequence.")
+    parser.add_argument("-c", "--combinations", action="store_true", help="Generate every ordering of every subset (up to max_combine) of the provided keywords.")
+    parser.add_argument("--max-combine", type=int, default=2, help="Maximum number of raw keywords to join into one base string (default: 2). Applies when using -i or -c.")
+    parser.add_argument("--minlen", type=int, help="Minimum length (inclusive) of any resulting password. Mutations shorter than this are skipped.")
+    parser.add_argument("--maxlen", type=int, help="Maximum length (inclusive) of any resulting password. Mutations longer than this are skipped.")
+    parser.add_argument("--sep", type=str, default="", help="Separator to insert between joined keywords (default: no separator).")
+    parser.add_argument("-an", "--append-numbering", action="store", help="Append numbering range at the end of each word mutation (before appending year or common paddings).\nThe LEVEL value represents the minimum number of digits. LEVEL must be >= 1. \nSet to 1 will append range: 1,2,3..100\nSet to 2 will append range: 01,02,03..100 + previous\nSet to 3 will append range: 001,002,003..100 + previous.\n\n", type=int, metavar='LEVEL')
+    parser.add_argument("-nl", "--numbering-limit", action="store", help="Change max numbering limit value of option -an. Default is 50. Must be used with -an.", type=int, metavar='LIMIT')
+    parser.add_argument("-y", "--years", action="store", help="Single OR comma separated OR range of years to be appended to each word mutation (Example: 2022 OR 1990,2017,2022 OR 1990-2000)")
+    parser.add_argument("-ap", "--append-padding", action="store", help="Add comma separated values to common paddings (must be used with -cpb OR -cpa)", metavar='VALUES')
+    parser.add_argument("-cpb", "--common-paddings-before", action="store_true", help="Append common paddings before each mutated word")
+    parser.add_argument("-cpa", "--common-paddings-after", action="store_true", help="Append common paddings after each mutated word")
+    parser.add_argument("-cpo", "--custom-paddings-only", action="store_true", help="Use only user provided paddings for word mutations (must be used with -ap AND (-cpb OR -cpa))")
+    parser.add_argument("-o", "--output", action="store", help="Output filename (default: output.txt)", metavar='FILENAME')
+    parser.add_argument("-q", "--quiet", action="store_true", help="Do not print the banner on startup")
+    parser.add_argument("--no-color", action="store_true", help="Disable colored output (also auto-disabled when stdout is not a TTY or NO_COLOR is set)")
+    parser.add_argument("-u", "--unique", action="store_true", help="Remove duplicate lines from the final wordlist (order-preserving). Adds a post-processing pass.")
+    return parser
 
-args = parser.parse_args()
 
-# Disable ANSI colors when requested, when piped/redirected, or when the
-# NO_COLOR convention (https://no-color.org) is set, so escape codes don't
-# leak into files or non-TTY consumers.
-USE_COLOR = not (args.no_color or os.environ.get('NO_COLOR') is not None or not sys.stdout.isatty())
-if not USE_COLOR:
-    MAIN = LOGO = LOGO2 = GREEN = ORANGE = PRPL = PRPL2 = RED = END = BOLD = ''
-
-def exit_with_msg(msg):
+def exit_with_msg(parser, msg):
     parser.print_help()
     print(f'\n[{RED}Debug{END}] {msg}\n')
     sys.exit(1)
 
 
-def within_length(word):
-    """
-    Return True if `word` (without trailing newline) passes the configured
-    --minlen/--maxlen filters. Centralizing this avoids the off-by-one that
-    occurred when some stages measured the string including its '\\n'.
-    """
-    n = len(word)
-    if args.minlen and n < args.minlen:
-        return False
-    if args.maxlen and n > args.maxlen:
-        return False
-    return True
+def parse_years(parser, raw):
+    """Parse the -y argument (single, comma list, or range) into a list of strings."""
+    def valid(y):
+        return y.isdecimal() and 1000 <= int(y) <= 3200
+
+    err = 'Illegal year(s) input. Acceptable years range: 1000 - 3200.'
+
+    if ',' not in raw and '-' not in raw:
+        if valid(raw):
+            return [raw]
+        exit_with_msg(parser, err)
+
+    if ',' in raw:
+        years = []
+        for y in raw.split(','):
+            y = y.strip()
+            if not valid(y):
+                exit_with_msg(parser, err)
+            years.append(y)
+        return years
+
+    if raw.count('-') == 1:
+        start, end = raw.split('-')
+        if valid(start) and valid(end) and int(start) < int(end):
+            return [str(y) for y in range(int(start), int(end) + 1)]
+        exit_with_msg(parser, err)
+
+    exit_with_msg(parser, err)
 
 
+def load_paddings(parser, args):
+    """Resolve the list of padding values from the file and/or -ap, per the flags."""
+    use_paddings = args.common_paddings_before or args.common_paddings_after
 
-# Append numbering
-if args.numbering_limit and not args.append_numbering:
-    exit_with_msg('Option -nl must be used with -an.')
+    if (args.custom_paddings_only or args.append_padding) and not use_paddings:
+        exit_with_msg(parser, 'Options -ap and -cpo must be used with -cpa or -cpb.')
 
-if args.append_numbering:
-    if args.append_numbering <= 0:
-        exit_with_msg('Numbering level must be > 0.')
+    paddings = []
+    if use_paddings and not args.custom_paddings_only:
+        try:
+            with open(PADDINGS_FILE, 'r') as f:
+                paddings = [val.strip() for val in f.readlines()]
+        except FileNotFoundError:
+            exit_with_msg(parser, f'File "{PADDINGS_FILE}" not found.')
+        except OSError as e:
+            exit_with_msg(parser, f'Could not read "{PADDINGS_FILE}": {e}')
 
-_max = args.numbering_limit + 1 if args.numbering_limit and isinstance(args.numbering_limit, int) else 51
+    if args.append_padding:
+        for val in args.append_padding.split(','):
+            if val.strip() != '' and val not in paddings:
+                paddings.append(val)
+
+    if use_paddings:
+        paddings = list(set(paddings))
+
+    return paddings
 
 
-# Create years list     
-if args.years:
-    
-    years = []
-    
-    if args.years.count(',') == 0 and args.years.count('-') == 0 and args.years.isdecimal() and int(args.years) >= 1000 and int(args.years) <= 3200:
-        years.append(str(args.years))
+def build_keywords(args):
+    """Build the list of base keywords from -w, honoring -i/-c/--sep/--max-combine."""
+    raw = []
+    for w in args.words.split(','):
+        w = w.strip()
+        if not w:
+            continue
+        if w.isdecimal():
+            return None  # caller reports the error
+        raw.append(w)
 
-    elif args.years.count(',') > 0:
-        for year in args.years.split(','):
-            if year.strip() != '' and year.isdecimal() and int(year) >= 1000 and int(year) <= 3200: 
-                years.append(year)
-            else:
-                exit_with_msg('Illegal year(s) input. Acceptable years range: 1000 - 3200.')
+    limit = min(len(raw), args.max_combine)
+    keywords = []
 
-    elif args.years.count('-') == 1:
-        years_range = args.years.split('-')
-        start_year = years_range[0]
-        end_year = years_range[1]
-        
-        if (start_year.isdecimal() and int(start_year) < int(end_year) and int(start_year) >= 1000) and (end_year.isdecimal() and int(end_year) <= 3200):
-            for y in range(int(years_range[0]), int(years_range[1])+1):
-                years.append(str(y))
-        else:
-            exit_with_msg('Illegal year(s) input. Acceptable years range: 1000 - 3200.')
+    if args.inorder:
+        for r in range(1, limit + 1):
+            for combo in itertools.combinations(raw, r):
+                keywords.append(args.sep.join(combo))
+    elif args.combinations:
+        for r in range(1, limit + 1):
+            for combo in itertools.combinations(raw, r):
+                for perm in itertools.permutations(combo):
+                    keywords.append(args.sep.join(perm))
     else:
-        exit_with_msg('Illegal year(s) input. Acceptable years range: 1000 - 3200.')
-            
+        keywords = list(raw)
 
+    return keywords
+
+
+# ----------------( Presentation )---------------- #
 def banner():
     padding = '  '
 
-    P = [[' ', '┌', '─', '┐'], [' ', '├','─','┘'], [' ', '┴',' ',' ']]
-    S = [[' ', '┌','─','┐'], [' ', '└','─','┐'], [' ', '└','─','┘']]
-    U = [[' ', '┬',' ','┬'], [' ', '│',' ','│'], [' ', '└','─','┘']]
-    D = [[' ', '┌','┬','┐'], [' ', ' ','│','│'], [' ', '─','┴','┘']]
-    O = [[' ', '┌','─','┐'], [' ', '│',' ','│'], [' ', '└','─','┘']]
-    H = [[' ', '┐', ' ', '┌'], [' ', '├','╫','┤'], [' ', '┘',' ','└']]  
-    A = [[' ', '┌','─','┐'], [' ', '├','─','┤'], [' ', '┴',' ','┴']]
-    S = [[' ', '┌','─','┐'], [' ', '└','─','┐'], [' ', '└','─','┘']]
-    H = [[' ', '┬',' ','┬'], [' ', '├','─','┤'], [' ', '┴',' ','┴']]
+    P = [[' ', '┌', '─', '┐'], [' ', '├', '─', '┘'], [' ', '┴', ' ', ' ']]
+    S = [[' ', '┌', '─', '┐'], [' ', '└', '─', '┐'], [' ', '└', '─', '┘']]
+    U = [[' ', '┬', ' ', '┬'], [' ', '│', ' ', '│'], [' ', '└', '─', '┘']]
+    D = [[' ', '┌', '┬', '┐'], [' ', ' ', '│', '│'], [' ', '─', '┴', '┘']]
+    O = [[' ', '┌', '─', '┐'], [' ', '│', ' ', '│'], [' ', '└', '─', '┘']]
+    H = [[' ', '┐', ' ', '┌'], [' ', '├', '╫', '┤'], [' ', '┘', ' ', '└']]
+    A = [[' ', '┌', '─', '┐'], [' ', '├', '─', '┤'], [' ', '┴', ' ', '┴']]
+    S = [[' ', '┌', '─', '┐'], [' ', '└', '─', '┐'], [' ', '└', '─', '┘']]
+    H = [[' ', '┬', ' ', '┬'], [' ', '├', '─', '┤'], [' ', '┴', ' ', '┴']]
 
-    banner = [P,S,U,D,O,H,A,S,H]
+    chars = [P, S, U, D, O, H, A, S, H]
     final = []
     print('\r')
     init_color = 37
@@ -162,582 +369,111 @@ def banner():
     cl = 0
 
     for charset in range(0, 3):
-        for pos in range(0, len(banner)):
-            for i in range(0, len(banner[pos][charset])):
+        for pos in range(0, len(chars)):
+            for i in range(0, len(chars[pos][charset])):
                 clr = f'\033[38;5;{txt_color}m' if USE_COLOR else ''
-                char = f'{clr}{banner[pos][charset][i]}'
-                final.append(char)
+                final.append(f'{clr}{chars[pos][charset][i]}')
                 cl += 1
                 txt_color = txt_color + 36 if cl <= 3 else txt_color
-
             cl = 0
-
             txt_color = init_color
         init_color += 31
-
-        if charset < 2: final.append('\n   ')
+        if charset < 2:
+            final.append('\n   ')
 
     print(f"   {''.join(final)}")
     print(f'{END}{padding}                        by t3l3machus\n')
 
 
-# ----------------( Base Settings )---------------- #
-mutations_cage = []
-basic_mutations = []
-outfile = args.output if args.output else 'output.txt'
-trans_keys = []
+def human_size(num_bytes):
+    if num_bytes > 100000:
+        return f'{round(num_bytes / 1000 / 1000, 1)} MB'
+    return f'{num_bytes} bytes'
 
-transformations = [
-    {'a' : ['@', '4']},
-    {'b' : '8'},
-    {'e' : '3'},
-    {'g' : ['9', '6']},
-    {'i' : ['1', '!']},
-    {'o' : '0'},
-    {'s' : ['$', '5']},
-    {'t' : '7'}
-]
 
-for t in transformations:
-    for key in t.keys():
-        trans_keys.append(key)
-
-# Common Padding Values
-if (args.custom_paddings_only or args.append_padding) and not (args.common_paddings_before or args.common_paddings_after):
-    exit_with_msg('Options -ap and -cpo must be used with -cpa or -cpb.')
-    
-    
-elif (args.common_paddings_before or args.common_paddings_after) and not args.custom_paddings_only:
-    
-    try:
-        with open(PADDINGS_FILE, 'r') as f:
-            common_paddings = [val.strip() for val in f.readlines()]
-
-    except FileNotFoundError:
-        exit_with_msg(f'File "{PADDINGS_FILE}" not found.')
-    except OSError as e:
-        exit_with_msg(f'Could not read "{PADDINGS_FILE}": {e}')
-
-elif (args.common_paddings_before or args.common_paddings_after) and (args.custom_paddings_only and args.append_padding):
-    common_paddings = []
-
-elif not (args.common_paddings_before or args.common_paddings_after):
-    common_paddings = []
-
-else:
-    exit_with_msg('\nIllegal padding settings.\n')      
-
-if args.append_padding:
-    for val in args.append_padding.split(','):
-        if val.strip() != '' and val not in common_paddings: 
-            common_paddings.append(val)
-
-
-if (args.common_paddings_before or args.common_paddings_after):
-    common_paddings = list(set(common_paddings))
-
-
-# ----------------( Functions )---------------- #
-# The following list is used to create variations of password values and appended years.
-# For example, a passwd value {passwd} will be mutated to "{passwd}{separator}{year}"
-# for each of the symbols included in the list below.
-year_separators = ['', '_', '-', '@']
-
-
-
-# ----------------( Functions )---------------- #
-def evalTransformations(w):
-    """Return the indices of characters in `w` that have leet substitutions."""
-    trans_chars = []
-
-    for c, char in enumerate(w):
-        for t in transformations:
-            if char in t.keys():
-                trans_chars.append(c)
-
-    return trans_chars
-
-        
-
-def mutate(tc, word):
-    
-    global trans_keys, mutations_cage, basic_mutations
-    
-    i = trans_keys.index(word[tc].lower())
-    trans = transformations[i][word[tc].lower()]
-    limit = len(trans) * len(mutations_cage)
-    c = 0
-    
-    for m in mutations_cage:
-        w = list(m)         
-
-        if isinstance(trans, list):
-            for tt in trans:
-                w[tc] = tt
-                transformed = ''.join(w)
-                mutations_cage.append(transformed)
-                c += 1
-        else:
-            w[tc] = trans
-            transformed = ''.join(w)
-            mutations_cage.append(transformed)
-            c += 1
-        
-        if limit == c: break
-        
-    return mutations_cage
-    
-
-
-def mutations_handler(kword, trans_chars):
-    """
-    Perform character→symbol/number substitutions and write each new mutation.
-    """
-    global mutations_cage, basic_mutations
-
-    container = []
-    for word in basic_mutations:
-        mutations_cage = [word.strip()]
-        for tc in trans_chars:
-            results = mutate(tc, kword)
-        container.append(results)
-
-    for m_set in container:
-        for m in m_set:
-            basic_mutations.append(m)
-
-    basic_mutations = list(set(basic_mutations))
-
-    desc = " ├─ Mutating word based on commonly used char‐to‐symbol/number substitutions"
-    with open(outfile, 'a') as wordlist, \
-         tqdm(total=len(basic_mutations), desc=desc, leave=False) as pbar:
-
-        for m in basic_mutations:
-            # Only final‐filter if no numbering/years/padding follow
-            if not args.append_numbering and not args.years and not (args.common_paddings_after or args.common_paddings_before):
-                if within_length(m):
-                    wordlist.write(m + '\n')
-            else:
-                wordlist.write(m + '\n')
-            pbar.update(1)
-
-    print(f"{desc}... [100.0%]")
-
-
-def mutateCase(word):
-    trans = list(map(''.join, itertools.product(*zip(word.upper(), word.lower()))))
-    return trans
-
-
-
-def caseMutationsHandler(word, mutability):
-    """
-    Generate all upper/lower combos, add to basic_mutations,
-    and write to file immediately if mutability is False.
-    """
-    global basic_mutations
-    case_mutations = mutateCase(word)
-
-    desc = " ├─ Producing character case‐based transformations"
-    with open(outfile, 'a') as wordlist, \
-         tqdm(total=len(case_mutations), desc=desc, leave=False) as pbar:
-
-        for m in case_mutations:
-            basic_mutations.append(m)
-            if not mutability:
-                # Only final‐filter if no substitutions/numbering/years/padding follow
-                if not args.combinations and not args.inorder \
-                   and not args.append_numbering and not args.years \
-                   and not (args.common_paddings_after or args.common_paddings_before):
-                    if within_length(m):
-                        wordlist.write(m + '\n')
-                else:
-                    wordlist.write(m + '\n')
-            pbar.update(1)
-
-    print(f"{desc}... [100.0%]")
-
-
-def append_numbering():
-    """
-    For each word in basic_mutations, append numbering variants (zfilled up to LEVEL).
-    """
-    global _max, basic_mutations
-
-    lvl = args.append_numbering
-    first_cycle = True
-    previous_list = []
-
-    # total lines = len(basic_mutations) * lvl * (_max - 1) * 2
-    total_lines = len(basic_mutations) * lvl * (_max - 1) * 2
-    desc = " ├─ Appending numbering to each word mutation"
-
-    with open(outfile, 'a') as wordlist, \
-         tqdm(total=total_lines, desc=desc, leave=False) as pbar:
-
-        for word in basic_mutations:
-            for i in range(1, lvl + 1):
-                for k in range(1, _max):
-                    num_z = str(k).zfill(i)
-                    variant1 = f"{word}{num_z}"
-                    variant2 = f"{word}_{num_z}"
-
-                    if first_cycle:
-                        # Only final‐filter if no years or padding follow
-                        follow = args.years or args.common_paddings_after or args.common_paddings_before
-                        for variant in (variant1, variant2):
-                            if not follow:
-                                if within_length(variant):
-                                    wordlist.write(variant + '\n')
-                            else:
-                                wordlist.write(variant + '\n')
-                            pbar.update(1)
-                        previous_list.append(variant1)
-                    else:
-                        if previous_list[k - 1] != variant1:
-                            wordlist.write(variant1 + '\n')
-                            wordlist.write(variant2 + '\n')
-                            previous_list[k - 1] = variant1
-                            pbar.update(2)
-
-                first_cycle = False
-
-    print(f"{desc}... [100.0%]")    
-
-
-def mutate_years():
-    """
-    For each entry in basic_mutations, append year variants (full YYYY + short YY).
-    """
-    global basic_mutations
-    current_mutations = basic_mutations.copy()
-
-    # total lines = len(current_mutations) * len(years) * len(year_separators) * 2
-    total_lines = len(current_mutations) * len(years) * len(year_separators) * 2
-    desc = " ├─ Appending year patterns after each word mutation"
-
-    with open(outfile, 'a') as wordlist, \
-         tqdm(total=total_lines, desc=desc, leave=False) as pbar:
-
-        for word in current_mutations:
-            for y in years:
-                for sep in year_separators:
-                    full = f"{word}{sep}{y}"
-                    short = f"{word}{sep}{y[2:]}"
-                    # Only final-filter if no padding follows
-                    paddings_follow = args.common_paddings_after or args.common_paddings_before
-                    for variant in (full, short):
-                        if not paddings_follow:
-                            if within_length(variant):
-                                wordlist.write(variant + '\n')
-                                basic_mutations.append(variant)
-                        else:
-                            wordlist.write(variant + '\n')
-                            basic_mutations.append(variant)
-                        pbar.update(1)
-
-    print(f"{desc}... [100.0%]")
-
-
-def check_underscore(word, pos):
-    if word[pos] == '_':
-        return True
-    else:
-        return False
-        
-
-def append_paddings_before():
-    """
-    Prepend each common_paddings value before each word in basic_mutations.
-    """
-    global basic_mutations
-    current_mutations = basic_mutations.copy()
-
-    # total lines = sum(len(common_paddings)*2 for each word)
-    total_lines = sum(len(common_paddings) * 2 for _ in current_mutations)
-    desc = " ├─ Appending common paddings before each word mutation"
-
-    with open(outfile, 'a') as wordlist, \
-         tqdm(total=total_lines, desc=desc, leave=False) as pbar:
-
-        for word in current_mutations:
-            for val in common_paddings:
-                variants = [f"{val}{word}"]
-                if not check_underscore(val, -1):
-                    variants.append(f"{val}_{word}")
-
-                # Prepending paddings is always the final stage, so filter here.
-                for variant in variants:
-                    if within_length(variant):
-                        wordlist.write(variant + '\n')
-                    pbar.update(1)
-
-    print(f"{desc}... [100.0%]")
-
-
-def append_paddings_after():
-    """
-    Append each common_paddings value after each word in basic_mutations.
-    """
-    global basic_mutations
-    current_mutations = basic_mutations.copy()
-
-    # total lines = sum(len(common_paddings)*2 for each word)
-    total_lines = sum(len(common_paddings) * 2 for _ in current_mutations)
-    desc = " ├─ Appending common paddings after each word mutation"
-
-    with open(outfile, 'a') as wordlist, \
-         tqdm(total=total_lines, desc=desc, leave=False) as pbar:
-
-        for word in current_mutations:
-            for val in common_paddings:
-                variants = [f"{word}{val}"]
-                if not check_underscore(val, 0):
-                    variants.append(f"{word}_{val}")
-
-                for variant in variants:
-                    # Only final-filter if no before-padding follows this stage
-                    if not args.common_paddings_before:
-                        if within_length(variant):
-                            wordlist.write(variant + '\n')
-                    else:
-                        wordlist.write(variant + '\n')
-                    pbar.update(1)
-
-    print(f"{desc}... [100.0%]")
-
-
-def calculate_output(keyw):
-    
-    global trans_keys
-    
-    c = 0
-    total = 1
-    basic_total = 1
-    basic_size = 0
-    size = 0
-    numbering_count = 0
-    numbering_size = 0
-    
-    # Basic mutations calc
-    for char in keyw:
-        if char in trans_keys:
-            i = trans_keys.index(keyw[c].lower())
-            trans = transformations[i][keyw[c].lower()]
-            basic_total *= (len(trans) + 2)     
-        else:
-            basic_total = basic_total * 2 if char.isalpha() else basic_total
-            
-        c += 1
-    
-    total = basic_total 
-    basic_size = total * (len(keyw) + 1)
-    size = basic_size
-    
-    # Words numbering mutations calc
-    if args.append_numbering:
-        global _max
-        word_len = len(keyw) + 1
-        first_cycle = True
-        previous_list = []
-        lvl = args.append_numbering
-            
-        for w in range(0, total):
-            for i in range(1, lvl+1):       
-                for k in range(1, _max):
-                    n = str(k).zfill(i)
-                    if first_cycle:                 
-                        numbering_count += 2                        
-                        numbering_size += (word_len * 2) + (len(n) * 2) + 1
-                        previous_list.append(f'{w}{n}')
-                        
-                    else:
-                        if previous_list[k - 1] != f'{w}{n}':
-                            numbering_size += (word_len * 2) + (len(n) * 2) + 1
-                            numbering_count += 2
-                            previous_list[k - 1] = f'{w}{n}'
-
-                first_cycle = False
-
-        del previous_list
-        
-    # Adding years mutations calc
-    if args.years:
-        patterns = len(year_separators) * 2
-        year_chars = 4
-        year_short = 2
-        years_len = len(years)
-        size += (basic_size * patterns * years_len)
-
-        for sep in year_separators:
-            size += (basic_total * (year_chars + len(sep)) * years_len)
-            size += (basic_total * (year_short  + len(sep)) * years_len)
-
-        total += total * len(years) * patterns
-        basic_total = total
-        basic_size = size
-    
-    # Common paddings mutations calc
-    patterns = 2
-    
-    if args.common_paddings_after or args.common_paddings_before:
-        paddings_len = len(common_paddings)
-        pads_wlen_sum = sum([basic_total*len(w) for w in common_paddings])
-        _pads_wlen_sum = sum([basic_total*(len(w)+1) for w in common_paddings])
-        
-        if args.common_paddings_after and args.common_paddings_before:      
-            size += ((basic_size * patterns * paddings_len) + pads_wlen_sum + _pads_wlen_sum) * 2
-            total += (total * len(common_paddings) * 2) * 2
-        
-        elif args.common_paddings_after or args.common_paddings_before:
-            size += (basic_size * patterns * paddings_len) + pads_wlen_sum + _pads_wlen_sum
-            total += total * len(common_paddings) * 2
-    
-    return [total + numbering_count, size + numbering_size]
-
-
-
-def check_mutability(word):
-    
-    global trans_keys
-    m = 0
-    
-    for char in word:
-        if char in trans_keys:
-            m += 1
-    
-    return m
-
-
-
-def deduplicate_file(path):
-    """
-    Remove duplicate lines from `path` in place, preserving first-seen order.
-    Streams line by line through a temp file, holding only a set of seen
-    lines in memory (one entry per unique word).
-    Returns (kept, removed) counts.
-    """
-    seen = set()
-    kept = removed = 0
-    tmp_path = f'{path}.dedup.tmp'
-
-    with open(path, 'r') as src, open(tmp_path, 'w') as dst:
-        for line in src:
-            if line in seen:
-                removed += 1
-                continue
-            seen.add(line)
-            dst.write(line)
-            kept += 1
-
-    os.replace(tmp_path, path)
-    return kept, removed
-
-
+# ----------------( Main )---------------- #
 def main():
+    global MAIN, LOGO, LOGO2, GREEN, ORANGE, PRPL, PRPL2, RED, END, BOLD, USE_COLOR
+
+    parser = build_parser()
+    args = parser.parse_args()
+
+    # Disable ANSI colors on request, when piped/redirected, or per NO_COLOR
+    # (https://no-color.org), so escape codes don't leak to files/non-TTYs.
+    USE_COLOR = not (args.no_color or os.environ.get('NO_COLOR') is not None or not sys.stdout.isatty())
+    if not USE_COLOR:
+        MAIN = LOGO = LOGO2 = GREEN = ORANGE = PRPL = PRPL2 = RED = END = BOLD = ''
 
     if not args.quiet:
         banner()
-    
-    global basic_mutations, mutations_cage
 
-    # 1) Read raw keywords (ignore empty or digit-only)
-    raw = []
-    for w in args.words.split(','):
-        w = w.strip()
-        if not w:
-            continue
-        if w.isdecimal():
-            exit_with_msg('Unable to mutate digit-only keywords.')
-        raw.append(w)
+    # Validate numbering options
+    if args.numbering_limit and not args.append_numbering:
+        exit_with_msg(parser, 'Option -nl must be used with -an.')
+    if args.append_numbering is not None and args.append_numbering <= 0:
+        exit_with_msg(parser, 'Numbering level must be > 0.')
 
-    # 2) Build "base" keywords according to flags:
-    #    - If --inorder: join each r-subset in the given order, for r=1..max_combine.
-    #    - Elif --combinations: for each r-subset (1..max_combine), generate every permutation.
-    #    - Else: treat each raw word on its own.
-    from itertools import combinations, permutations
+    numbering_max = (args.numbering_limit + 1) if args.numbering_limit else 51
 
-    keywords = []
-    limit = min(len(raw), args.max_combine)
+    years = parse_years(parser, args.years) if args.years else []
+    paddings = load_paddings(parser, args)
 
-    if args.inorder:
-        for r in range(1, limit + 1):
-            for combo in combinations(raw, r):
-                keywords.append(args.sep.join(combo))
-    elif args.combinations:
-        for r in range(1, limit + 1):
-            for combo in combinations(raw, r):
-                for perm in permutations(combo):
-                    keywords.append(args.sep.join(perm))
-    else:
-        keywords = list(raw)
+    keywords = build_keywords(args)
+    if keywords is None:
+        exit_with_msg(parser, 'Unable to mutate digit-only keywords.')
 
-    # Calculate total words and size of output
-    total_size = [0, 0]
-    
-    for keyw in keywords:
-        count_size = calculate_output(keyw.strip().lower())
-        total_size[0] += count_size[0]
-        total_size[1] += count_size[1]
-    
-    size = round(((total_size[1]/1000)/1000), 1) if total_size[1] > 100000 else total_size[1]
-    prefix = 'bytes' if total_size[1] <= 100000 else 'MB'
-    fsize = f'{size} {prefix}'
-    
+    cfg = Config(
+        minlen=args.minlen,
+        maxlen=args.maxlen,
+        numbering_level=args.append_numbering,
+        numbering_max=numbering_max,
+        years=years,
+        paddings=paddings,
+        pad_after=args.common_paddings_after or args.custom_paddings_only,
+        pad_before=args.common_paddings_before,
+    )
+
+    outfile = args.output if args.output else 'output.txt'
+    lowered = [kw.lower() for kw in keywords]
+
+    # Count pass: derive the exact word count and byte size from the very same
+    # generator that will write the file, so the two can never drift apart.
     print(f'[{MAIN}Info{END}] Calculating output length and size...')
+    total_words = 0
+    total_bytes = 0
+    for kw in lowered:
+        for word in generate_keyword(kw, cfg):
+            total_words += 1
+            total_bytes += len(word) + 1
 
-    # Inform user about the output size
-    if args.minlen or args.maxlen:
-        prompt = (f'[{ORANGE}Warning{END}] Exact final size cannot be determined because min/max-length filtering is active. Without filtering, this would produce {BOLD}{total_size[0]}{END} words, {BOLD}{fsize}{END}. Continue? [y/n]: ')
-    else:
-        prompt = (f'[{ORANGE}Warning{END}] This operation will produce {BOLD}{total_size[0]}{END} words, {BOLD}{fsize}{END}. Are you sure you want to proceed? [y/n]: ')
+    prompt = (f'[{ORANGE}Warning{END}] This operation will produce {BOLD}{total_words}{END} words, '
+              f'{BOLD}{human_size(total_bytes)}{END}'
+              f'{" (before deduplication)" if args.unique else ""}. '
+              f'Are you sure you want to proceed? [y/n]: ')
 
     try:
         consent = input(prompt)
     except KeyboardInterrupt:
-        exit('\n')
-    
+        sys.exit('\n')
+
     if consent.lower() not in ['y', 'yes']:
         sys.exit(f'\n[{RED}X{END}] Aborting.')
-        
-    else:
-        
-        open(outfile, "w").close()
-        
-        for word in keywords:
-            print(f'[{GREEN}*{END}] Mutating keyword: {GREEN}{word}{END} ') 
-            mutability = check_mutability(word.lower())
-                    
-            # Stage 1: Case mutations
-            caseMutationsHandler(word.lower(), mutability)
-            # Stage 2: Substitution mutations
-            if mutability:
-                trans_chars = evalTransformations(word.lower())
-                mutations_handler(word, trans_chars)
-            else:
-                print(f" ├─ {ORANGE}No character substitution instructions match this word.{END}")
-            # Stage 3: Numbering
-            if args.append_numbering:
-                append_numbering()
-            # Stage 4: Years
-            if args.years:
-                mutate_years()
-            # Stage 5: Common paddings after
-            if args.common_paddings_after or args.custom_paddings_only:
-                append_paddings_after()
-            # Stage 6: Common paddings before
-            if args.common_paddings_before:
-                append_paddings_before()            
-            basic_mutations = []
-            mutations_cage = []
-            print(f' └─ Done!')
 
-        if args.unique:
-            kept, removed = deduplicate_file(outfile)
-            print(f'[{MAIN}Info{END}] Removed {removed} duplicate(s); {kept} unique words remain.')
+    # Write pass.
+    with open(outfile, 'w') as wordlist, \
+         tqdm(total=total_words, desc=' ├─ Writing mutations', leave=False) as pbar:
+        for word, kw in zip(keywords, lowered):
+            print(f'[{GREEN}*{END}] Mutating keyword: {GREEN}{word}{END}')
+            for mutation in generate_keyword(kw, cfg):
+                wordlist.write(mutation + '\n')
+                pbar.update(1)
 
-        print(f'\n[{MAIN}Info{END}] Completed! List saved in {outfile}\n')
-            
+    if args.unique:
+        kept, removed = deduplicate_file(outfile)
+        print(f'[{MAIN}Info{END}] Removed {removed} duplicate(s); {kept} unique words remain.')
+
+    print(f'\n[{MAIN}Info{END}] Completed! List saved in {outfile}\n')
+
 
 if __name__ == '__main__':
     main()

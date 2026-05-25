@@ -48,17 +48,32 @@ year_seperators = ['', '_', '-', '@']
 For example, if the given keyword is "amazon" and option `-y 2023` was used, the output will include "amazon2023", "amazon_2023", "amazon-2023", "amazon@2023", "amazon23", "amazon_23", "amazon-23", "amazon@23".
 
 ## Installation
-Install Python 3.x and `tqdm` first:
+This fork uses [uv](https://docs.astral.sh/uv/) for dependency management.
+```bash
+git clone https://github.com/jee4nc/psudohash.git
+cd ./psudohash
+uv sync
+```
+Then run it with:
+```bash
+uv run python psudohash.py -w example -cpa
+```
+
+<details>
+<summary>Without uv (plain pip)</summary>
 
 ```bash
 pip3 install tqdm
-```
-Then clone the repo and make the script executable:
-```
-git clone https://github.com/t3l3machus/psudohash.git
-cd ./psudohash
 chmod +x psudohash.py
-```  
+./psudohash.py -w example -cpa
+```
+</details>
+
+### Running the tests
+```bash
+uv run pytest
+```
+
 ## Usage
 ```
 ./psudohash.py [-h] -w WORDS [-i] [-c] [--sep SEP] [--max-combine N] [--minlen N] [--maxlen N] [-an LEVEL] [-nl LIMIT] [-y YEARS] [-ap VALUES] [-cpb] [-cpa] [-cpo] [-o FILENAME] [-q] [--no-color] [-u]
@@ -151,7 +166,6 @@ The help dialog [ -h, --help ] includes usage details and examples.
 5. **Length Filtering (`--minlen`/`--maxlen`)**  
    ```bash
 	./psudohash.py -w apple,banana -i --minlen 10
-	# Warning: exact size cannot be determined because of length filters.
 	# Example final outputs might include “applebanana” (11 chars), “bananaapple” (11 chars).
    ```
 
@@ -169,8 +183,8 @@ The help dialog [ -h, --help ] includes usage details and examples.
 
 ## Usage Tips
 1. Combining options `--years` and `--append-numbering` with a `--numbering-limit` ≥ last two digits of any year input, will most likely produce duplicate words because of the mutation patterns implemented by the tool. 
-2. If you add custom padding values and/or modify the predefined common padding values in the source code, in combination with multiple optional parameters, there is a small chance of duplicate words occurring. psudohash includes word filtering controls but for speed's sake, those are limited.
-3. When using `--minlen` or `--maxlen`, the script cannot pre-calculate the exact word count; you’ll see a “exact size cannot be determined” warning and the size without this filter will be calculated, the final size will be smaller.
+2. If you add custom padding values and/or modify the predefined common padding values in the source code, in combination with multiple optional parameters, there is a small chance of duplicate words occurring. Use `-u`/`--unique` to remove any duplicates from the final wordlist.
+3. The reported word count and size are exact, even when `--minlen`/`--maxlen` filtering is active, because they are derived from the same generator that writes the file (counted with a no-write pass first).
 
 ## Individuals
 When it comes to people, i think we all have (more or less) set passwords using a mutation of one or more words that mean something to us e.g., our name or wife/kid/pet/band names, sticking the year we were born at the end or maybe a super secure padding like "!@#". Well, guess what?
